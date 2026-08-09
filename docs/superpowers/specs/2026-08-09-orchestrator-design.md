@@ -328,8 +328,10 @@ pub trait HotkeyBackend: Send + Sync {
     async fn unregister(&self, id: HotkeyId) -> Result<(), HotkeyError>;
 
     /// Single event stream for all registrations on this backend instance.
-    /// Returns an unbounded MPSC receiver emitting (HotkeyId, HotkeyEvent) tuples.
-    fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<(HotkeyId, HotkeyEvent)>;
+    /// Returns a synchronous channel receiver emitting (HotkeyId, HotkeyEvent) tuples.
+    /// Async backend implementations (e.g., via zbus/tokio) bridge their async event source
+    /// into this synchronous channel internally — that bridging is an implementation detail.
+    fn subscribe(&self) -> std::sync::mpsc::Receiver<(HotkeyId, HotkeyEvent)>;
 
     /// Human-readable backend name for diagnostics.
     fn backend_name(&self) -> &'static str;
