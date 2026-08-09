@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use ashpd::desktop::Session;
 use futures_util::StreamExt;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::HotkeyError;
 use crate::trait_def::HotkeyBackend;
@@ -62,7 +63,20 @@ pub struct KdePortalHotkeyBackend {
     /// `NewShortcut` value. `NewShortcut` (the *request* type) doesn't
     /// expose an id accessor -- only `Shortcut` (the *response* type) does
     /// -- so we track the action_name ourselves for later removal.
-    shortcuts: Mutex<Vec<(String, NewShortcut)>>,
+    ///
+    /// This is a `tokio::sync::Mutex`, not a `std::sync::Mutex`, and
+    /// deliberately so: both `register` and `unregister` hold the guard
+    /// across their entire read-modify-write-then-`bind_shortcuts` critical
+    /// section, including the `.await` on the portal round trip. `register`
+    /// and `unregister` take `&self`, so concurrent calls are possible (e.g.
+    /// registering several profiles' hotkeys concurrently); without this,
+    /// two interleaved calls could each snapshot the list before either
+    /// `bind_shortcuts` response came back, and whichever response was
+    /// processed last would silently overwrite the other's binding. Holding
+    /// the lock across the `.await` serializes them instead. A
+    /// `std::sync::Mutex` guard can't soundly span an `.await` point, hence
+    /// `tokio::sync::Mutex` here.
+    shortcuts: AsyncMutex<Vec<(String, NewShortcut)>>,
     /// action_name -> minted `HotkeyId`. Also used by the forwarding task to
     /// translate `Activated`/`Deactivated` signals' `shortcut_id` (which we
     /// set to the action_name, see `register`) into a `HotkeyId`.
@@ -78,9 +92,13 @@ pub struct KdePortalHotkeyBackend {
     /// `subscribe`'s doc comment for why a second call doesn't panic).
     event_rx: Mutex<Option<std::sync::mpsc::Receiver<(HotkeyId, HotkeyEvent)>>>,
     /// Keeps the background forwarding task alive for the backend's
-    /// lifetime. Never polled directly; dropping the backend drops this and
-    /// cancels the task.
-    _forward_task: tokio::task::JoinHandle<()>,
+    /// lifetime. Never polled directly. Note that dropping a
+    /// `JoinHandle` on its own does *not* cancel the task -- per Tokio's
+    /// documented semantics it only detaches it, leaving it (and the D-Bus
+    /// connection its captured streams hold) running in the background
+    /// indefinitely. The `Drop` impl below calls `.abort()` on this handle
+    /// explicitly to actually stop the task when the backend is dropped.
+    forward_task: tokio::task::JoinHandle<()>,
 }
 
 impl KdePortalHotkeyBackend {
@@ -162,13 +180,23 @@ impl KdePortalHotkeyBackend {
         Ok(Self {
             proxy,
             session,
-            shortcuts: Mutex::new(Vec::new()),
+            shortcuts: AsyncMutex::new(Vec::new()),
             ids,
             next_id: AtomicU64::new(1),
             suppressed,
             event_rx: Mutex::new(Some(rx)),
-            _forward_task: forward_task,
+            forward_task,
         })
+    }
+}
+
+impl Drop for KdePortalHotkeyBackend {
+    /// A bare `JoinHandle` drop only detaches the spawned task rather than
+    /// cancelling it (see `forward_task`'s doc comment) -- abort it
+    /// explicitly so the background signal-forwarding task actually stops
+    /// when the backend is dropped, instead of continuing to run detached.
+    fn drop(&mut self) {
+        self.forward_task.abort();
     }
 }
 
@@ -286,19 +314,22 @@ impl HotkeyBackend for KdePortalHotkeyBackend {
     /// the accumulated list and re-`bind_shortcuts`es the *full* list every
     /// time (not just the new entry), which is correct whether or not the
     /// portal's `bind_shortcuts` appends or replaces per call.
+    ///
+    /// Holds `self.shortcuts`'s lock across the whole mutate-then-
+    /// `bind_shortcuts` sequence (see that field's doc comment) so a
+    /// concurrent `register`/`unregister` call can't race on a stale
+    /// snapshot and silently overwrite this registration.
     async fn register(
         &self,
         action_name: &str,
         _preferred: Option<&KeyCombo>,
     ) -> Result<(HotkeyId, KeyCombo), HotkeyError> {
-        let snapshot: Vec<NewShortcut> = {
-            let mut shortcuts = self.shortcuts.lock().unwrap();
-            shortcuts.push((
-                action_name.to_string(),
-                NewShortcut::new(action_name, action_name),
-            ));
-            shortcuts.iter().map(|(_, s)| s.clone()).collect()
-        };
+        let mut shortcuts = self.shortcuts.lock().await;
+        shortcuts.push((
+            action_name.to_string(),
+            NewShortcut::new(action_name, action_name),
+        ));
+        let snapshot: Vec<NewShortcut> = shortcuts.iter().map(|(_, s)| s.clone()).collect();
 
         let request = self
             .proxy
@@ -334,6 +365,10 @@ impl HotkeyBackend for KdePortalHotkeyBackend {
     /// doc comment. Both exist deliberately: the portal call is the "real"
     /// unregistration if it works, and the local filter is a backstop that
     /// works regardless.
+    ///
+    /// Like `register`, holds `self.shortcuts`'s lock across the whole
+    /// mutate-then-`bind_shortcuts` sequence, so it can't race a concurrent
+    /// `register`/`unregister` call (see that field's doc comment).
     async fn unregister(&self, id: HotkeyId) -> Result<(), HotkeyError> {
         self.suppressed.lock().unwrap().insert(id.clone());
 
@@ -351,11 +386,9 @@ impl HotkeyBackend for KdePortalHotkeyBackend {
             return Ok(());
         };
 
-        let snapshot: Vec<NewShortcut> = {
-            let mut shortcuts = self.shortcuts.lock().unwrap();
-            remove_action(&mut shortcuts, &action_name);
-            shortcuts.iter().map(|(_, s)| s.clone()).collect()
-        };
+        let mut shortcuts = self.shortcuts.lock().await;
+        remove_action(&mut shortcuts, &action_name);
+        let snapshot: Vec<NewShortcut> = shortcuts.iter().map(|(_, s)| s.clone()).collect();
 
         self.proxy
             .bind_shortcuts(&self.session, &snapshot, None, Default::default())
@@ -536,5 +569,91 @@ mod tests {
         let mut shortcuts = vec![("a".to_string(), NewShortcut::new("a", "a"))];
         remove_action(&mut shortcuts, "does-not-exist");
         assert_eq!(shortcuts.len(), 1);
+    }
+
+    // -- lifecycle / concurrency mechanisms -------------------------------
+    //
+    // Neither `KdePortalHotkeyBackend::new` nor the trait methods can be
+    // exercised directly in a unit test without a live D-Bus session (see
+    // the module doc comment and the task report). The two tests below
+    // instead directly verify the underlying tokio mechanisms the Drop impl
+    // and the register/unregister locking pattern rely on, using the exact
+    // same primitives (`JoinHandle::abort`, a `tokio::sync::Mutex` guard
+    // held across an `.await`) rather than duplicating unverifiable D-Bus
+    // logic.
+
+    #[tokio::test]
+    async fn abort_stops_a_running_background_task() {
+        // Mirrors what `forward_task` would do if left unaborted: loop
+        // forever. A bare `JoinHandle` drop would only detach this (per
+        // Tokio's documented semantics) -- it keeps running until something
+        // calls `.abort()` on it, which is exactly why `KdePortalHotkeyBackend`
+        // has an explicit `Drop` impl instead of relying on the field drop.
+        let handle = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "the loop should still be running before any abort"
+        );
+
+        handle.abort();
+        let result = handle.await;
+        assert!(
+            result.unwrap_err().is_cancelled(),
+            "abort() must actually stop the task, not just detach it"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_mutex_serializes_critical_section_across_await() {
+        // Same shape as register()/unregister(): lock a tokio::sync::Mutex,
+        // mutate, then `.await` (standing in for the bind_shortcuts round
+        // trip) *before* releasing the guard. Proves concurrent callers
+        // never observe/mutate the shared state mid-critical-section, which
+        // is what prevents the lost-update race the fix addresses.
+        use std::sync::atomic::AtomicBool;
+
+        let shortcuts: AsyncMutex<Vec<i32>> = AsyncMutex::new(Vec::new());
+        let in_critical_section = AtomicBool::new(false);
+        let overlap_detected = AtomicBool::new(false);
+
+        async fn register_like(
+            shortcuts: &AsyncMutex<Vec<i32>>,
+            in_critical_section: &AtomicBool,
+            overlap_detected: &AtomicBool,
+            value: i32,
+        ) {
+            let mut guard = shortcuts.lock().await;
+            if in_critical_section.swap(true, Ordering::SeqCst) {
+                overlap_detected.store(true, Ordering::SeqCst);
+            }
+            guard.push(value);
+            // Stands in for the `bind_shortcuts` `.await` -- the guard is
+            // still held here, unlike the pre-fix code.
+            tokio::task::yield_now().await;
+            in_critical_section.store(false, Ordering::SeqCst);
+        }
+
+        tokio::join!(
+            register_like(&shortcuts, &in_critical_section, &overlap_detected, 1),
+            register_like(&shortcuts, &in_critical_section, &overlap_detected, 2),
+            register_like(&shortcuts, &in_critical_section, &overlap_detected, 3),
+        );
+
+        assert!(
+            !overlap_detected.load(Ordering::SeqCst),
+            "two callers were inside the critical section at once"
+        );
+        let final_state = shortcuts.lock().await;
+        assert_eq!(
+            final_state.len(),
+            3,
+            "no concurrent registration should be lost"
+        );
     }
 }
