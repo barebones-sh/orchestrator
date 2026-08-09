@@ -114,7 +114,7 @@ pub enum MacroStep {
     },
     MouseClick {
         delay_ms: u32,
-        button: MouseButton,
+        button: orchestrator_input::MouseButton,
         position: ClickPosition,
     },
     Drag {
@@ -134,12 +134,6 @@ pub enum ClickPosition {
     Fixed { x: i32, y: i32 },
     /// Inject at the current cursor position (resolved at injection time).
     AtCursor,
-}
-
-pub enum MouseButton {
-    Left,
-    Right,
-    Middle,
 }
 ```
 
