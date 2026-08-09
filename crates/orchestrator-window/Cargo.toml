@@ -5,14 +5,17 @@ edition = "2021"
 
 [features]
 default = []
-kde = ["dep:zbus", "dep:tokio"]
+kde = ["dep:zbus", "dep:tokio", "dep:futures-util", "dep:tempfile", "dep:serde_json"]
 macos = []
 
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
 zbus = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+tempfile = { version = "3", optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

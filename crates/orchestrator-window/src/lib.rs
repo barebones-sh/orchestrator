@@ -9,6 +9,9 @@ pub use vocab::*;
 #[cfg(feature = "macos")]
 pub mod macos;
 
+#[cfg(feature = "kde")]
+pub mod kwin_dbus;
+
 #[cfg(test)]
 mod tests {
     use super::*;
