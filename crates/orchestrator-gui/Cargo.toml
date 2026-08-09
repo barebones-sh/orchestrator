@@ -8,3 +8,21 @@ name = "orchestrator-gui"
 path = "src/main.rs"
 
 [dependencies]
+
+# Backend selection (design spec §4), mirroring orchestrator-cli's Cargo.toml.
+# orchestrator-gui remains a placeholder binary (src/main.rs is unchanged by
+# this task -- no GUI-side smoke-test hook was added, see Task 9 report) but
+# gets the same feature wiring so the real kde/wayland backends are already
+# reachable, and actually compiled into the built binary's dependency graph
+# (see `cargo tree -p orchestrator-gui`), once GUI code exists to use them.
+[target.'cfg(target_os = "linux")'.dependencies]
+orchestrator-core = { path = "../orchestrator-core", features = ["kde", "wayland"] }
+orchestrator-hotkey = { path = "../orchestrator-hotkey", features = ["kde"] }
+orchestrator-window = { path = "../orchestrator-window", features = ["kde"] }
+orchestrator-input = { path = "../orchestrator-input", features = ["wayland"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+orchestrator-core = { path = "../orchestrator-core", features = ["macos"] }
+orchestrator-hotkey = { path = "../orchestrator-hotkey", features = ["macos"] }
+orchestrator-window = { path = "../orchestrator-window", features = ["macos"] }
+orchestrator-input = { path = "../orchestrator-input", features = ["macos"] }

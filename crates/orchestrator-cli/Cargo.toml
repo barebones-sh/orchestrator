@@ -9,4 +9,24 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-orchestrator-core = { path = "../orchestrator-core" }
+
+# Backend selection (design spec §4 "Dependency Philosophy" /
+# "orchestrator-cli and orchestrator-gui select backends via"): each OS build
+# compiles exactly one set of real backends, selected via Cargo features, not
+# a runtime switch. orchestrator-core is included alongside the three trait
+# crates directly (not only transitively) because the hidden
+# internal-*-smoke-test subcommands in src/main.rs construct the real backend
+# types (`KdePortalHotkeyBackend`, `KwinWindowLocator`, `YdotoolInputInjector`)
+# themselves.
+[target.'cfg(target_os = "linux")'.dependencies]
+orchestrator-core = { path = "../orchestrator-core", features = ["kde", "wayland"] }
+orchestrator-hotkey = { path = "../orchestrator-hotkey", features = ["kde"] }
+orchestrator-window = { path = "../orchestrator-window", features = ["kde"] }
+orchestrator-input = { path = "../orchestrator-input", features = ["wayland"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+orchestrator-core = { path = "../orchestrator-core", features = ["macos"] }
+orchestrator-hotkey = { path = "../orchestrator-hotkey", features = ["macos"] }
+orchestrator-window = { path = "../orchestrator-window", features = ["macos"] }
+orchestrator-input = { path = "../orchestrator-input", features = ["macos"] }

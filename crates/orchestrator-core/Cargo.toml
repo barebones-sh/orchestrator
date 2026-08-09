@@ -3,6 +3,21 @@ name = "orchestrator-core"
 version = "0.1.0"
 edition = "2021"
 
+# Feature-forwarding only -- orchestrator-core itself has no platform code of
+# its own (see lib.rs's doc comment). These exist so `orchestrator-cli`'s and
+# `orchestrator-gui`'s `[target.'cfg(...)'.dependencies]` blocks (design spec
+# §4) can request real backends transitively via
+# `orchestrator-core = { features = ["kde", "wayland"] }` without also having
+# to enumerate the three trait crates' own feature names themselves. None of
+# these are in `default`, so `orchestrator-core`'s own default dependency
+# resolution (and `cargo tree -p orchestrator-core -e normal`) stays free of
+# `zbus`/`ashpd`/`tokio`.
+[features]
+default = []
+kde = ["orchestrator-hotkey/kde", "orchestrator-window/kde"]
+wayland = ["orchestrator-input/wayland"]
+macos = ["orchestrator-hotkey/macos", "orchestrator-window/macos", "orchestrator-input/macos"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = "1"

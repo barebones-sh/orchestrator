@@ -602,6 +602,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "orchestrator-core",
+ "orchestrator-hotkey",
+ "orchestrator-input",
+ "orchestrator-window",
+ "tokio",
 ]
 
 [[package]]
@@ -620,6 +624,12 @@ dependencies = [
 [[package]]
 name = "orchestrator-gui"
 version = "0.1.0"
+dependencies = [
+ "orchestrator-core",
+ "orchestrator-hotkey",
+ "orchestrator-input",
+ "orchestrator-window",
+]
 
 [[package]]
 name = "orchestrator-hotkey"
