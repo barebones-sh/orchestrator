@@ -1,0 +1,10 @@
+[package]
+name = "orchestrator-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "orchestrator-gui"
+path = "src/main.rs"
+
+[dependencies]

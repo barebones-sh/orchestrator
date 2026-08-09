@@ -3,6 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = { version = "1" }
 zbus = { version = "5.18" }
