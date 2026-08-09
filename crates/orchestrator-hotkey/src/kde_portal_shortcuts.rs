@@ -331,22 +331,44 @@ impl HotkeyBackend for KdePortalHotkeyBackend {
         ));
         let snapshot: Vec<NewShortcut> = shortcuts.iter().map(|(_, s)| s.clone()).collect();
 
-        let request = self
+        // From here on, any early return must first undo the push above --
+        // otherwise a failed registration (portal error, user cancelling
+        // KDE's assignment dialog, or a malformed response) leaves a dead
+        // entry in `shortcuts` forever: it has no corresponding `ids` entry
+        // for `unregister` to ever find and remove, and it gets re-sent on
+        // every future `bind_shortcuts` call. Combined with `register` having
+        // no duplicate-registration guard, a natural retry after a failure
+        // would then push a *second* entry for the same action_name,
+        // compounding the leak. `shortcuts` is still locked here, so
+        // `remove_action` is race-free with any concurrent caller.
+        let request = match self
             .proxy
             .bind_shortcuts(&self.session, &snapshot, None, Default::default())
             .await
-            .map_err(map_portal_err)?;
-        let response = request.response().map_err(map_portal_err)?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                remove_action(&mut shortcuts, action_name);
+                return Err(map_portal_err(e));
+            }
+        };
+        let response = match request.response() {
+            Ok(r) => r,
+            Err(e) => {
+                remove_action(&mut shortcuts, action_name);
+                return Err(map_portal_err(e));
+            }
+        };
 
-        let bound = response
-            .shortcuts()
-            .iter()
-            .find(|s| s.id() == action_name)
-            .ok_or_else(|| {
-                HotkeyError::RegistrationFailed(format!(
+        let bound = match response.shortcuts().iter().find(|s| s.id() == action_name) {
+            Some(b) => b,
+            None => {
+                remove_action(&mut shortcuts, action_name);
+                return Err(HotkeyError::RegistrationFailed(format!(
                     "portal bind_shortcuts response did not include an entry for action {action_name:?}"
-                ))
-            })?;
+                )));
+            }
+        };
         let combo = parse_trigger_description(bound.trigger_description());
 
         let id = HotkeyId(self.next_id.fetch_add(1, Ordering::SeqCst));
@@ -569,6 +591,52 @@ mod tests {
         let mut shortcuts = vec![("a".to_string(), NewShortcut::new("a", "a"))];
         remove_action(&mut shortcuts, "does-not-exist");
         assert_eq!(shortcuts.len(), 1);
+    }
+
+    #[test]
+    fn register_style_push_then_failure_leaves_no_trace() {
+        // `register()` itself can't be exercised without a live portal
+        // session (see the "lifecycle / concurrency mechanisms" note
+        // below), but its push-then-on-error-`remove_action` shape (the
+        // Finding 2 fix) is exactly this: push a new entry, then on ANY
+        // failure path (bind_shortcuts erroring, or the response missing the
+        // expected action) call `remove_action` before returning the error.
+        // Model that shape directly against the real `remove_action` used by
+        // the fix, proving a failed "registration" leaves `shortcuts`
+        // byte-for-byte as it was before the attempt -- so a retry starts
+        // clean instead of accumulating dead entries.
+        let mut shortcuts: Vec<(String, NewShortcut)> = vec![(
+            "existing-action".to_string(),
+            NewShortcut::new("existing-action", "existing-action"),
+        )];
+        let before = shortcuts.len();
+
+        let action_name = "new-action";
+        shortcuts.push((
+            action_name.to_string(),
+            NewShortcut::new(action_name, action_name),
+        ));
+        assert_eq!(shortcuts.len(), before + 1);
+
+        // Simulate any of register()'s error paths (bind_shortcuts failing,
+        // or the response not containing the action) by immediately
+        // rolling back via remove_action, exactly as the fixed code does.
+        remove_action(&mut shortcuts, action_name);
+
+        assert_eq!(
+            shortcuts.len(),
+            before,
+            "a failed registration must not leave a dead entry behind"
+        );
+        assert!(shortcuts.iter().all(|(name, _)| name != action_name));
+
+        // A subsequent retry with the same action_name must be able to push
+        // exactly one fresh entry, not stack a second dead one on top.
+        shortcuts.push((
+            action_name.to_string(),
+            NewShortcut::new(action_name, action_name),
+        ));
+        assert_eq!(shortcuts.len(), before + 1);
     }
 
     // -- lifecycle / concurrency mechanisms -------------------------------

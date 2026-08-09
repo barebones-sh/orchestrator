@@ -36,10 +36,21 @@ enum Command {
     },
 
     /// Construct the real KWin D-Bus window locator (`KwinWindowLocator`),
-    /// list all windows, and print the currently focused window.
+    /// list all windows, print the currently focused window, and (if a
+    /// handle is given) call `activate_window` on it. Run once with no
+    /// handle to see the list of available handles, then run again with one
+    /// copied from that output to actually exercise activation -- see
+    /// `activate_window`'s role in the "activate target -> inject -> restore
+    /// prior focus" sequence documented in
+    /// `docs/superpowers/specs/2026-08-09-wayland-injection-spike-findings.md`.
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
-    InternalWindowSmokeTest,
+    InternalWindowSmokeTest {
+        /// A `WindowHandle` string (e.g. copied from a prior no-argument
+        /// run's window list) to pass to `activate_window`. Omit to only
+        /// list windows and print the focused one.
+        handle: Option<String>,
+    },
 
     /// Construct the real ydotool input injector (`YdotoolInputInjector`),
     /// connect to `ydotoold`, and inject one keypress (press then release)
@@ -60,7 +71,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         Some(Command::InternalHotkeySmokeTest { app_id }) => linux_smoke::hotkey_smoke_test(app_id),
         #[cfg(target_os = "linux")]
-        Some(Command::InternalWindowSmokeTest) => linux_smoke::window_smoke_test(),
+        Some(Command::InternalWindowSmokeTest { handle }) => linux_smoke::window_smoke_test(handle),
         #[cfg(target_os = "linux")]
         Some(Command::InternalInputSmokeTest { key }) => linux_smoke::input_smoke_test(key),
     }
@@ -79,7 +90,7 @@ mod linux_smoke {
     use orchestrator_input::linux_wayland::YdotoolInputInjector;
     use orchestrator_input::{InputEvent, InputInjector};
     use orchestrator_window::kwin_dbus::KwinWindowLocator;
-    use orchestrator_window::WindowLocator;
+    use orchestrator_window::{WindowHandle, WindowLocator};
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -133,7 +144,7 @@ mod linux_smoke {
         });
     }
 
-    pub fn window_smoke_test() {
+    pub fn window_smoke_test(handle: Option<String>) {
         runtime().block_on(async {
             eprintln!("internal-window-smoke-test: constructing KwinWindowLocator");
             let locator = match KwinWindowLocator::new().await {
@@ -157,6 +168,25 @@ mod linux_smoke {
             match locator.focused_window().await {
                 Ok(handle) => println!("focused window: {handle:?}"),
                 Err(e) => eprintln!("focused_window failed: {e}"),
+            }
+
+            // Only exercised when a handle is given (e.g. copied from the
+            // window list printed above on a prior run) -- see this
+            // variant's doc comment. `activate_window` is otherwise
+            // untouched by this smoke test, even though it's the single
+            // most load-bearing mechanic the whole Scope::Window feature
+            // rests on (activate target -> inject -> restore prior focus).
+            if let Some(handle) = handle {
+                println!("activating window with handle {handle:?}...");
+                match locator.activate_window(&WindowHandle(handle)).await {
+                    Ok(()) => println!("activate_window: ok"),
+                    Err(e) => eprintln!("activate_window failed: {e}"),
+                }
+            } else {
+                println!(
+                    "no handle given; skipping activate_window. Re-run with a handle copied \
+                     from the window list above to exercise it."
+                );
             }
         });
     }

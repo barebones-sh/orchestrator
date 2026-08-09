@@ -30,6 +30,7 @@
 //! double-encoded-payload fallback path, against fixed string fixtures.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -63,7 +64,16 @@ struct RawWindowInfo {
     id: String,
     title: String,
     class_name: String,
-    pid: u32,
+    /// KWin's `Window.pid` is a JS `int` and can be `-1` when unknown, or
+    /// (depending on the JS engine's JSON encoding) absent entirely. Kept as
+    /// a signed, optional field here -- unlike the final public
+    /// `WindowInfo::pid: Option<u32>` -- so that one window with no pid
+    /// fails to deserialize *that field* rather than failing
+    /// `parse_json_payload::<Vec<RawWindowInfo>>` (and therefore
+    /// `list_windows()`) for the entire desktop. See [`raw_to_window_info`]
+    /// for the negative/missing -> `None` mapping.
+    #[serde(default)]
+    pid: Option<i64>,
 }
 
 /// Map any D-Bus/zbus/(de)serialization failure into an actionable
@@ -104,7 +114,20 @@ try {{
     let mut file = tempfile::NamedTempFile::with_prefix("orchestrator-window-")?;
     file.write_all(script.as_bytes())?;
     let path = file.into_temp_path();
-    let script_name = format!("orchestrator-window-{}", std::process::id());
+    // Unique per invocation (process id + a monotonically increasing
+    // counter), not just the process id: a fixed per-process name means
+    // that if a script is ever left loaded in KWin (e.g. cleanup failing to
+    // run -- see the timeout handling below), the *next* call would collide
+    // with it and `loadScript` would return a negative id, permanently
+    // bricking the backend until the process restarts. A unique name per
+    // call sidesteps that collision even if a previous script's cleanup
+    // didn't happen for some other reason.
+    static SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let script_name = format!(
+        "orchestrator-window-{}-{}",
+        std::process::id(),
+        SCRIPT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
 
     let path_str = path
         .to_str()
@@ -146,37 +169,45 @@ try {{
     .await
     .map_err(map_err_msg)?;
 
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(msg) = stream.next().await {
-            let msg = msg.map_err(|e| map_err_msg(format!("message stream error: {e}")))?;
-            let header = msg.header();
-            if header.message_type() != MessageType::MethodCall {
-                continue;
-            }
-            if header.path().map(|p| p.as_str()) != Some("/") {
-                continue;
-            }
-            let member = header.member().map(|m| m.as_str()).unwrap_or("");
-            let payload: String = match msg.body().deserialize() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            match member {
-                "result" => return Ok(payload),
-                "error" => {
-                    return Err(WindowError::BackendUnavailable(format!(
-                        "KWin script error: {payload}"
-                    )))
+    // Bind the timeout's own `Result` (timed-out-or-not) to a local instead
+    // of an early `?` here -- the `unloadScript` cleanup below must run
+    // unconditionally, including on timeout. An early return on timeout
+    // would skip it, leaving the script loaded in KWin under `script_name`
+    // forever (see this function's doc comment / the module's Finding 1
+    // fix); the outer `Result<Result<..>, Elapsed>` is flattened into the
+    // original error *after* cleanup has already run.
+    let outcome: Result<Result<String, WindowError>, tokio::time::error::Elapsed> =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(msg) = stream.next().await {
+                let msg = msg.map_err(|e| map_err_msg(format!("message stream error: {e}")))?;
+                let header = msg.header();
+                if header.message_type() != MessageType::MethodCall {
+                    continue;
                 }
-                _ => continue,
+                if header.path().map(|p| p.as_str()) != Some("/") {
+                    continue;
+                }
+                let member = header.member().map(|m| m.as_str()).unwrap_or("");
+                let payload: String = match msg.body().deserialize() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                match member {
+                    "result" => return Ok(payload),
+                    "error" => {
+                        return Err(WindowError::BackendUnavailable(format!(
+                            "KWin script error: {payload}"
+                        )))
+                    }
+                    _ => continue,
+                }
             }
-        }
-        Err(map_err_msg("message stream ended unexpectedly"))
-    })
-    .await
-    .map_err(|_| map_err_msg("timed out waiting for KWin script callback"))?;
+            Err(map_err_msg("message stream ended unexpectedly"))
+        })
+        .await;
 
-    // Best-effort cleanup regardless of success/failure above.
+    // Best-effort cleanup regardless of success/failure/timeout above --
+    // this now genuinely runs unconditionally, matching the comment.
     let _ = conn
         .call_method(
             Some("org.kde.KWin"),
@@ -187,7 +218,7 @@ try {{
         )
         .await;
 
-    result
+    outcome.map_err(|_| map_err_msg("timed out waiting for KWin script callback"))?
 }
 
 /// KWin sometimes delivers `JSON.stringify` output double-encoded (observed
@@ -210,7 +241,10 @@ fn parse_json_payload<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T
 fn raw_to_window_info(raw: RawWindowInfo) -> WindowInfo {
     WindowInfo {
         handle: WindowHandle(raw.id),
-        pid: Some(raw.pid),
+        // Negative (KWin's "unknown", e.g. -1) or missing pid -> None,
+        // rather than failing the parse -- see `RawWindowInfo::pid`'s doc
+        // comment.
+        pid: raw.pid.and_then(|p| u32::try_from(p).ok()),
         process_name: if raw.class_name.is_empty() {
             None
         } else {
@@ -241,6 +275,40 @@ fn map_activate_payload(payload: &str) -> Result<(), WindowError> {
     } else {
         Ok(())
     }
+}
+
+/// Build the KWin JS body for `activate_window`, given the target window's
+/// handle. Pure/testable, used by `activate_window`.
+///
+/// `target_id` is JSON-encoded (via `serde_json::to_string`, which correctly
+/// escapes quotes/backslashes/control characters) rather than raw-formatted
+/// inside manually-written quote characters, so it cannot break out of the
+/// generated string literal. This matters because `WindowHandle` values are
+/// no longer guaranteed to originate only from KWin's own UUIDs:
+/// `orchestrator-core`'s `Scope::Window::backend_hint_id` field holds
+/// exactly this kind of value and is loaded from user-editable JSON config
+/// on disk, so a hand-edited/malformed config already has a schema'd path to
+/// an arbitrary string reaching this interpolation site.
+fn build_activate_script(target_id: &str) -> String {
+    // `serde_json::to_string` on a `&str` cannot fail.
+    let encoded_target_id =
+        serde_json::to_string(target_id).expect("string serialization is infallible");
+    format!(
+        r#"
+    var t = workspace.windowList();
+    var found = false;
+    var target = {encoded_target_id};
+    for (var i = 0; i < t.length; i++) {{
+        var w = t[i];
+        if (w.internalId.toString() == target) {{
+            workspace.activeWindow = w;
+            found = true;
+            break;
+        }}
+    }}
+    output_result(found ? "activated" : "not_found");
+"#
+    )
 }
 
 impl WindowLocator for KwinWindowLocator {
@@ -276,25 +344,12 @@ impl WindowLocator for KwinWindowLocator {
         Ok(map_focused_payload(payload))
     }
 
-    /// The spike's `activate_window`, verbatim, returning
+    /// The spike's `activate_window`, adapted to build its script body via
+    /// [`build_activate_script`] (JSON-encoded interpolation of the target
+    /// handle -- see that function's doc comment), returning
     /// `WindowError::NotFound` when the script reports `"not_found"`.
     async fn activate_window(&self, handle: &WindowHandle) -> Result<(), WindowError> {
-        let target_id = &handle.0;
-        let js = format!(
-            r#"
-    var t = workspace.windowList();
-    var found = false;
-    for (var i = 0; i < t.length; i++) {{
-        var w = t[i];
-        if (w.internalId.toString() == "{target_id}") {{
-            workspace.activeWindow = w;
-            found = true;
-            break;
-        }}
-    }}
-    output_result(found ? "activated" : "not_found");
-"#
-        );
+        let js = build_activate_script(&handle.0);
         let payload = run_kwin_script(&self.conn, &js).await?;
         map_activate_payload(&payload)
     }
@@ -319,7 +374,40 @@ mod tests {
         assert_eq!(parsed[0].id, "abc-123");
         assert_eq!(parsed[0].title, "Firefox");
         assert_eq!(parsed[0].class_name, "firefox");
-        assert_eq!(parsed[0].pid, 4242);
+        assert_eq!(parsed[0].pid, Some(4242));
+    }
+
+    #[test]
+    fn parses_negative_pid_without_failing_the_whole_array() {
+        // KWin's `Window.pid` is a JS `int` and can be `-1` when unknown
+        // (see `RawWindowInfo::pid`'s doc comment) -- one such window must
+        // not fail deserialization of the surrounding array/desktop.
+        let payload = r#"[
+            {"id":"abc-123","title":"Firefox","class_name":"firefox","pid":4242},
+            {"id":"def-456","title":"Unknown","class_name":"","pid":-1}
+        ]"#;
+        let parsed: Vec<RawWindowInfo> = parse_json_payload(payload).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].pid, Some(4242));
+        assert_eq!(parsed[1].pid, Some(-1));
+        assert_eq!(
+            raw_to_window_info(parsed.into_iter().nth(1).unwrap()).pid,
+            None
+        );
+    }
+
+    #[test]
+    fn parses_missing_pid_field_without_failing_the_whole_array() {
+        // Absent `pid` key entirely (not just null/-1) must also degrade
+        // gracefully via #[serde(default)] rather than failing the parse.
+        let payload = r#"[{"id":"ghi-789","title":"No Pid","class_name":""}]"#;
+        let parsed: Vec<RawWindowInfo> = parse_json_payload(payload).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pid, None);
+        assert_eq!(
+            raw_to_window_info(parsed.into_iter().next().unwrap()).pid,
+            None
+        );
     }
 
     #[test]
@@ -342,7 +430,7 @@ mod tests {
         assert_eq!(parsed[0].id, "xyz-789");
         assert_eq!(parsed[0].title, "VS Code");
         assert_eq!(parsed[0].class_name, "code");
-        assert_eq!(parsed[0].pid, 99);
+        assert_eq!(parsed[0].pid, Some(99));
     }
 
     #[test]
@@ -362,7 +450,7 @@ mod tests {
             id: "id-1".to_string(),
             title: "Some Popup".to_string(),
             class_name: String::new(),
-            pid: 10,
+            pid: Some(10),
         };
         let info = raw_to_window_info(raw);
         assert_eq!(info.handle, WindowHandle("id-1".to_string()));
@@ -377,7 +465,7 @@ mod tests {
             id: "id-2".to_string(),
             title: "Mozilla Firefox".to_string(),
             class_name: "firefox".to_string(),
-            pid: 4242,
+            pid: Some(4242),
         };
         let info = raw_to_window_info(raw);
         assert_eq!(info.process_name, Some("firefox".to_string()));
@@ -407,5 +495,65 @@ mod tests {
     #[test]
     fn activate_payload_activated_is_ok() {
         assert!(map_activate_payload("activated").is_ok());
+    }
+
+    // -- build_activate_script -------------------------------------------
+
+    #[test]
+    fn build_activate_script_embeds_plain_handle_as_a_string_literal() {
+        let js = build_activate_script("abc-123");
+        assert!(js.contains(r#"var target = "abc-123";"#));
+        assert!(js.contains(r#"if (w.internalId.toString() == target)"#));
+    }
+
+    #[test]
+    fn build_activate_script_escapes_a_quote_in_the_handle() {
+        // A handle containing a `"` must not be able to break out of the
+        // generated string literal -- this is exactly the injection Finding
+        // 4 addresses. Assert the generated *script text* is well-formed
+        // (the quote appears escaped, not raw) without needing a live D-Bus
+        // round trip.
+        let malicious = r#"" + (workspace.activeWindow = null) + ""#;
+        let js = build_activate_script(malicious);
+
+        // The raw, unescaped payload must never appear verbatim in the
+        // output -- if it did, the quote would have broken out of the
+        // string literal.
+        assert!(!js.contains(&format!("var target = \"{malicious}\";")));
+
+        // The value must instead show up as a single JSON-encoded string
+        // literal assigned to `target`, with all embedded quotes escaped.
+        let expected_literal = serde_json::to_string(malicious).unwrap();
+        assert!(js.contains(&format!("var target = {expected_literal};")));
+
+        // Sanity-check the generated script is syntactically well-formed JS
+        // by ensuring the number of unescaped (non-`\"`) double quotes on
+        // the `var target = ...;` line is exactly two (the literal's own
+        // opening/closing quotes).
+        let target_line = js
+            .lines()
+            .find(|l| l.trim_start().starts_with("var target ="))
+            .expect("generated script must contain a `var target = ...;` line");
+        let mut chars = target_line.chars().peekable();
+        let mut unescaped_quotes = 0;
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                chars.next();
+            } else if c == '"' {
+                unescaped_quotes += 1;
+            }
+        }
+        assert_eq!(
+            unescaped_quotes, 2,
+            "expected exactly the literal's own opening/closing quotes, got line: {target_line}"
+        );
+    }
+
+    #[test]
+    fn build_activate_script_handles_backslashes_and_control_chars() {
+        let tricky = "back\\slash\nand\ttab";
+        let js = build_activate_script(tricky);
+        let expected_literal = serde_json::to_string(tricky).unwrap();
+        assert!(js.contains(&format!("var target = {expected_literal};")));
     }
 }
