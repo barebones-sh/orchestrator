@@ -1,0 +1,13 @@
+[package]
+name = "orchestrator-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+dirs = "5"
+orchestrator-hotkey = { path = "../orchestrator-hotkey", default-features = false }
+orchestrator-input  = { path = "../orchestrator-input",  default-features = false }
+orchestrator-window = { path = "../orchestrator-window", default-features = false }
