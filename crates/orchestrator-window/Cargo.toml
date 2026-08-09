@@ -1,0 +1,19 @@
+[package]
+name = "orchestrator-window"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+kde = ["dep:zbus", "dep:tokio"]
+macos = []
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+zbus = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+serde_json = { version = "1" }

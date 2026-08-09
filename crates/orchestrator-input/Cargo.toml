@@ -1,0 +1,24 @@
+[package]
+name = "orchestrator-input"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+wayland = ["dep:zbus", "dep:tokio"]
+macos = []
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+zbus = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+# InputEvent::KeyPress/KeyRelease reuse orchestrator_hotkey::KeyCombo directly
+# (design doc §5 "orchestrator-input" vocabulary block and §2's reuse note) —
+# always available, no platform deps (default-features = false pulls in only
+# hotkey's vocab types: serde + thiserror).
+orchestrator-hotkey = { path = "../orchestrator-hotkey", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+serde_json = { version = "1" }
