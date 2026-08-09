@@ -12,7 +12,7 @@ macos = []
 serde = { workspace = true }
 thiserror = { workspace = true }
 zbus = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["process"] }
 # InputEvent::KeyPress/KeyRelease reuse orchestrator_hotkey::KeyCombo directly
 # (design doc §5 "orchestrator-input" vocabulary block and §2's reuse note) —
 # always available, no platform deps (default-features = false pulls in only
