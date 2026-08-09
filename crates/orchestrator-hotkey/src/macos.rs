@@ -10,9 +10,9 @@ pub struct MacosHotkeyBackend;
 impl HotkeyBackend for MacosHotkeyBackend {
     async fn register(
         &self,
-        _combo: &KeyCombo,
         _action_name: &str,
-    ) -> Result<HotkeyId, HotkeyError> {
+        _preferred: Option<&KeyCombo>,
+    ) -> Result<(HotkeyId, KeyCombo), HotkeyError> {
         Err(HotkeyError::BackendUnavailable(
             "macOS backend not yet implemented".into(),
         ))

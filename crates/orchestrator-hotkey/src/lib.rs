@@ -9,6 +9,9 @@ pub use vocab::*;
 #[cfg(feature = "macos")]
 pub mod macos;
 
+#[cfg(feature = "kde")]
+pub mod kde_portal_shortcuts;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,7 +55,7 @@ mod tests {
                 modifiers: vec![],
                 key: "F9".to_string(),
             };
-            let result = backend.register(&combo, "test-action").await;
+            let result = backend.register("test-action", Some(&combo)).await;
             assert!(matches!(result, Err(HotkeyError::BackendUnavailable(_))));
         }
 

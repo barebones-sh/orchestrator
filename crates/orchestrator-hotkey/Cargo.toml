@@ -5,14 +5,16 @@ edition = "2021"
 
 [features]
 default = []
-kde = ["dep:zbus", "dep:tokio"]
+kde = ["dep:zbus", "dep:tokio", "dep:ashpd", "dep:futures-util"]
 macos = []
 
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
 zbus = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["sync", "rt", "macros"] }
+ashpd = { workspace = true, optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

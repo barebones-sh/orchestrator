@@ -3,6 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
 clap = { version = "4.6.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = { version = "1" }

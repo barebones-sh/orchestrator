@@ -8,9 +8,16 @@ use crate::vocab::{HotkeyEvent, HotkeyId, KeyCombo};
 // concern behind this lint does not apply here.
 #[allow(async_fn_in_trait)]
 pub trait HotkeyBackend: Send + Sync {
-    /// Register a hotkey combination for a named action.
-    /// Returns a unique ID for later unregistration.
-    async fn register(&self, combo: &KeyCombo, action_name: &str) -> Result<HotkeyId, HotkeyError>;
+    /// Register a named action's hotkey. `preferred` is a hint some backends
+    /// may honor; the KDE backend ignores it and defers to the portal's own
+    /// assignment dialog (see the Wayland spike findings doc). Returns the
+    /// actually-bound combo alongside the id, since the caller cannot assume
+    /// its `preferred` value took effect.
+    async fn register(
+        &self,
+        action_name: &str,
+        preferred: Option<&KeyCombo>,
+    ) -> Result<(HotkeyId, KeyCombo), HotkeyError>;
 
     /// Unregister a previously registered hotkey.
     async fn unregister(&self, id: HotkeyId) -> Result<(), HotkeyError>;
