@@ -1,0 +1,25 @@
+[workspace]
+# Deliberately its own workspace root, not the product's -- see the doc comment
+# in this file's header and docs/superpowers/specs/2026-08-09-orchestrator-design.md §6.
+
+[package]
+name = "wayland-injection-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# Deliberately NOT a workspace member (see docs/superpowers/specs/2026-08-09-orchestrator-design.md
+# §6): throwaway exploratory code, not bound to the product workspace's lints/features.
+
+[[bin]]
+name = "spike"
+path = "src/main.rs"
+
+[dependencies]
+zbus = { version = "5.18.0", features = ["tokio"] }
+ashpd = { version = "0.13.13", features = ["tokio", "global_shortcuts", "remote_desktop", "screencast"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+futures-util = "0.3"
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
