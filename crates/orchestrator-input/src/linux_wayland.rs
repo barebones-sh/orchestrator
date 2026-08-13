@@ -121,16 +121,26 @@ impl InputInjector for YdotoolInputInjector {
     /// this only detects the problem and surfaces an actionable error
     /// pointing at the findings doc's setup steps (`input` group +
     /// `ydotoold` user service).
+    ///
+    /// Uses `UnixDatagram::connect`, not `UnixStream::connect`: `ydotoold`'s
+    /// socket is `SOCK_DGRAM`, not `SOCK_STREAM` (confirmed empirically
+    /// against a real running `ydotoold` -- a stream connect attempt fails
+    /// with `EPROTOTYPE`, "Protocol wrong type for socket", even though the
+    /// daemon is up and `inject()`'s real `ydotool` CLI calls work fine
+    /// against the same socket).
     async fn connect(&mut self) -> Result<(), InjectError> {
-        std::os::unix::net::UnixStream::connect(&self.socket_path).map_err(|e| {
-            InjectError::BackendUnavailable(format!(
-                "ydotoold socket not reachable at {}: {e}. Ensure your user is in the `input` \
-                 group and the `ydotoold` user service is enabled and running -- see the setup \
-                 steps in docs/superpowers/specs/2026-08-09-wayland-injection-spike-findings.md \
-                 (Phase 3a).",
-                self.socket_path.display()
-            ))
-        })?;
+        std::os::unix::net::UnixDatagram::unbound()
+            .and_then(|sock| sock.connect(&self.socket_path))
+            .map_err(|e| {
+                InjectError::BackendUnavailable(format!(
+                    "ydotoold socket not reachable at {}: {e}. Ensure your user is in the \
+                     `input` group and the `ydotoold` user service is enabled and running -- \
+                     see the setup steps in \
+                     docs/superpowers/specs/2026-08-09-wayland-injection-spike-findings.md \
+                     (Phase 3a).",
+                    self.socket_path.display()
+                ))
+            })?;
         Ok(())
     }
 
@@ -662,6 +672,38 @@ mod tests {
             }
             other => panic!("expected BackendUnavailable, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn connect_succeeds_against_a_real_datagram_socket() {
+        // Regression test for the SOCK_DGRAM-vs-SOCK_STREAM bug:
+        // `ydotoold` binds a `SOCK_DGRAM` Unix socket, not `SOCK_STREAM`, so
+        // connect() must use `UnixDatagram`, not `UnixStream`, or it will
+        // falsely report the backend unavailable even when a real daemon is
+        // listening. This binds a real `UnixDatagram` at a temp path
+        // (simulating what `ydotoold` does) and asserts connect() succeeds.
+        let dir = std::env::temp_dir().join(format!(
+            "orchestrator-input-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("ydotoold.sock");
+
+        let _listener = std::os::unix::net::UnixDatagram::bind(&socket_path)
+            .expect("failed to bind test UnixDatagram socket");
+
+        let mut injector = YdotoolInputInjector::with_socket_path(&socket_path);
+        let result = injector.connect().await;
+        assert!(
+            result.is_ok(),
+            "expected connect() to succeed against a real SOCK_DGRAM socket, got {result:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
