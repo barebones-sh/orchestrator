@@ -69,29 +69,10 @@ pub struct Runner<H: HotkeyBackend, I: InputInjector, W: WindowLocator> {
 }
 
 impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> Runner<H, I, W> {
-    pub fn new(hotkey: H, input: I, window: impl Into<Arc<W>>, profiles: Vec<Profile>) -> Self {
+    pub fn new(hotkey: H, input: impl Into<Arc<I>>, window: impl Into<Arc<W>>, profiles: Vec<Profile>) -> Self {
         Self {
             hotkey,
-            input: Arc::new(input),
-            window: window.into(),
-            profiles,
-        }
-    }
-
-    /// Test-only constructor variant accepting an already-shared `Arc<I>`,
-    /// so tests can keep their own clone to inspect after handing the other
-    /// clone into the `Runner` (see design spec's §3 "wrap `input`/`window`
-    /// in `Arc` internally"). Not exposed to real callers: `Runner::new`'s
-    /// `impl Into<Arc<I>>` variant for this parameter was tried first but
-    /// rejected — it collides with `std`'s blanket `impl<T> From<T> for T`
-    /// and `impl<T> From<T> for Arc<T>` impls whenever a caller already
-    /// holds an `Arc<I>` (exactly what these tests need), producing an
-    /// unresolvable `E0283` ambiguity at the call site.
-    #[cfg(test)]
-    fn new_with_shared_input(hotkey: H, input: Arc<I>, window: impl Into<Arc<W>>, profiles: Vec<Profile>) -> Self {
-        Self {
-            hotkey,
-            input,
+            input: input.into(),
             window: window.into(),
             profiles,
         }
@@ -536,7 +517,7 @@ mod toggle_tests {
         let window = FakeWindowLocator::new(vec![], None);
         let profile = desktop_repeat_profile("clicker", 20, 400);
 
-        let runner = Runner::new_with_shared_input(hotkey, Arc::clone(&input), window, vec![profile]);
+        let runner = Runner::<_, FakeInputInjector, _>::new(hotkey, Arc::clone(&input), window, vec![profile]);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let run_handle = tokio::spawn(runner.run(async {
@@ -569,7 +550,7 @@ mod toggle_tests {
         let window = FakeWindowLocator::new(vec![], None);
         let profile = desktop_repeat_profile("clicker", 20, 50);
 
-        let runner = Runner::new_with_shared_input(hotkey, Arc::clone(&input), window, vec![profile]);
+        let runner = Runner::<_, FakeInputInjector, _>::new(hotkey, Arc::clone(&input), window, vec![profile]);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let run_handle = tokio::spawn(runner.run(async {
             let _ = shutdown_rx.await;
@@ -602,7 +583,7 @@ mod toggle_tests {
         let window = FakeWindowLocator::new(vec![], None);
         let profile = desktop_repeat_profile("clicker", 20, 400); // long debounce
 
-        let runner = Runner::new_with_shared_input(hotkey, Arc::clone(&input), window, vec![profile]);
+        let runner = Runner::<_, FakeInputInjector, _>::new(hotkey, Arc::clone(&input), window, vec![profile]);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let run_handle = tokio::spawn(runner.run(async {
             let _ = shutdown_rx.await;
