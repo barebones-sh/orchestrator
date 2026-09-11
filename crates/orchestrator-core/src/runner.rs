@@ -49,6 +49,7 @@ struct ProfileState {
     running: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     last_toggle_at: Option<Instant>,
+    prior_focus: Option<orchestrator_window::WindowHandle>,
 }
 
 impl ProfileState {
@@ -57,8 +58,58 @@ impl ProfileState {
             running: None,
             task: None,
             last_toggle_at: None,
+            prior_focus: None,
         }
     }
+}
+
+/// Pure window-resolution policy shared by `handle_press`'s `Scope::Window`
+/// handling, kept standalone so it's independently unit-testable (design
+/// spec §2 "Scope").
+///
+/// Policy: filter by `process_name` first. If more than one window matches
+/// and `window_title_hint` is non-empty, narrow further by title
+/// substring match (falling back to the unfiltered process-name matches if
+/// the title hint matches nothing). Among the resulting candidates, prefer
+/// one whose handle equals `backend_hint_id` if present in the list;
+/// otherwise fall back to the first candidate.
+pub(crate) fn resolve_window(
+    windows: &[orchestrator_window::WindowInfo],
+    process_name: &str,
+    window_title_hint: &str,
+    backend_hint_id: Option<&str>,
+) -> Option<orchestrator_window::WindowHandle> {
+    let by_process: Vec<&orchestrator_window::WindowInfo> = windows
+        .iter()
+        .filter(|w| w.process_name.as_deref() == Some(process_name))
+        .collect();
+
+    let candidates: Vec<&orchestrator_window::WindowInfo> = if by_process.len() > 1 && !window_title_hint.is_empty() {
+        let filtered: Vec<&orchestrator_window::WindowInfo> = by_process
+            .iter()
+            .copied()
+            .filter(|w| w.title.contains(window_title_hint))
+            .collect();
+        if filtered.is_empty() {
+            by_process
+        } else {
+            filtered
+        }
+    } else {
+        by_process
+    };
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if let Some(hint_id) = backend_hint_id {
+        if let Some(exact) = candidates.iter().find(|w| w.handle.0 == hint_id) {
+            return Some(exact.handle.clone());
+        }
+    }
+
+    candidates.first().map(|w| w.handle.clone())
 }
 
 pub struct Runner<H: HotkeyBackend, I: InputInjector, W: WindowLocator> {
@@ -163,12 +214,30 @@ impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> R
             if let Some(task) = state.task.take() {
                 let _ = task.await;
             }
+            if let Some(prior) = state.prior_focus.take() {
+                let _ = self.window.activate_window(&prior).await;
+            }
             return;
         }
 
-        if !matches!(profile.scope, Scope::Desktop) {
-            // Scope::Window handling lands in Task 6.
-            return;
+        match &profile.scope {
+            Scope::Desktop => {}
+            Scope::Window {
+                process_name,
+                window_title_hint,
+                backend_hint_id,
+            } => {
+                let Ok(windows) = self.window.list_windows().await else { return };
+                let Some(handle) = resolve_window(&windows, process_name, window_title_hint, backend_hint_id.as_deref())
+                else {
+                    return; // no match -- toggle-on fails cleanly, profile stays off
+                };
+                let prior = self.window.focused_window().await.ok().flatten();
+                if self.window.activate_window(&handle).await.is_err() {
+                    return;
+                }
+                state.prior_focus = prior;
+            }
         }
 
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
@@ -822,6 +891,182 @@ mod macro_tests {
         assert!(matches!(injected[1], InputEvent::MouseButtonRelease(MouseButton::Left)));
 
         drop(injected);
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod window_resolution_tests {
+    use super::*;
+    use orchestrator_window::{WindowHandle, WindowInfo};
+
+    fn window(handle: &str, process_name: &str, title: &str) -> WindowInfo {
+        WindowInfo {
+            handle: WindowHandle(handle.to_string()),
+            pid: Some(1),
+            process_name: Some(process_name.to_string()),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolves_single_matching_process() {
+        let windows = vec![window("h1", "firefox", "Mozilla Firefox")];
+        let resolved = resolve_window(&windows, "firefox", "", None);
+        assert_eq!(resolved, Some(WindowHandle("h1".to_string())));
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let windows = vec![window("h1", "firefox", "Mozilla Firefox")];
+        let resolved = resolve_window(&windows, "chrome", "", None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn multiple_matches_filtered_by_title_hint() {
+        let windows = vec![
+            window("h1", "code", "project-a - VS Code"),
+            window("h2", "code", "project-b - VS Code"),
+        ];
+        let resolved = resolve_window(&windows, "code", "project-b", None);
+        assert_eq!(resolved, Some(WindowHandle("h2".to_string())));
+    }
+
+    #[test]
+    fn prefers_stored_backend_hint_id_among_matches() {
+        let windows = vec![
+            window("h1", "code", "a - VS Code"),
+            window("h2", "code", "b - VS Code"),
+        ];
+        // Title hint alone would match both (empty hint matches everything);
+        // backend_hint_id should pick h2 specifically.
+        let resolved = resolve_window(&windows, "code", "", Some("h2"));
+        assert_eq!(resolved, Some(WindowHandle("h2".to_string())));
+    }
+
+    #[test]
+    fn falls_back_to_first_match_when_backend_hint_id_not_present() {
+        let windows = vec![
+            window("h1", "code", "a - VS Code"),
+            window("h2", "code", "b - VS Code"),
+        ];
+        let resolved = resolve_window(&windows, "code", "", Some("stale-id-not-in-list"));
+        assert_eq!(resolved, Some(WindowHandle("h1".to_string())));
+    }
+}
+
+#[cfg(test)]
+mod window_scope_tests {
+    use super::fakes::*;
+    use super::*;
+    use crate::action::{Action, Jitter};
+    use crate::profile::{Profile, Scope};
+    use orchestrator_hotkey::{HotkeyEvent, KeyCombo, Modifier};
+    use orchestrator_input::InputEvent;
+    use orchestrator_window::{WindowHandle, WindowInfo};
+    use std::sync::Arc;
+
+    fn window_scoped_profile(name: &str, process_name: &str) -> Profile {
+        Profile {
+            name: name.to_string(),
+            trigger: KeyCombo {
+                modifiers: vec![Modifier::Ctrl],
+                key: "F9".to_string(),
+            },
+            action: Action::Repeat {
+                input: InputEvent::Scroll { dx: 0, dy: 1 },
+                interval_ms: 20,
+                jitter: Jitter::None,
+            },
+            scope: Scope::Window {
+                process_name: process_name.to_string(),
+                window_title_hint: String::new(),
+                backend_hint_id: None,
+            },
+            focus_steal: true,
+            debounce_ms: 50,
+        }
+    }
+
+    #[tokio::test]
+    async fn toggle_on_activates_target_once_and_toggle_off_restores_prior_focus() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let target = WindowHandle("target".to_string());
+        let prior = WindowHandle("prior-focus".to_string());
+        let window = Arc::new(FakeWindowLocator::new(
+            vec![WindowInfo {
+                handle: target.clone(),
+                pid: Some(1),
+                process_name: Some("firefox".to_string()),
+                title: "Mozilla Firefox".to_string(),
+            }],
+            Some(prior.clone()),
+        ));
+        let profile = window_scoped_profile("scoped", "firefox");
+
+        let runner = Runner::<_, FakeInputInjector, FakeWindowLocator>::new(hotkey, Arc::clone(&input), Arc::clone(&window), vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        assert!(
+            input.injected.lock().unwrap().len() >= 2,
+            "expected injection to have started after activation"
+        );
+        assert_eq!(
+            window.activated.lock().unwrap().as_slice(),
+            &[target.clone()],
+            "expected exactly one activate_window call (the target) at toggle-on"
+        );
+
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        assert_eq!(
+            window.activated.lock().unwrap().as_slice(),
+            &[target, prior],
+            "expected a second activate_window call restoring prior focus at toggle-off"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn toggle_on_fails_cleanly_when_no_window_matches() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = Arc::new(FakeWindowLocator::new(vec![], None));
+        let profile = window_scoped_profile("scoped", "nonexistent-app");
+
+        let runner = Runner::<_, FakeInputInjector, FakeWindowLocator>::new(hotkey, Arc::clone(&input), Arc::clone(&window), vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        assert_eq!(
+            input.injected.lock().unwrap().len(),
+            0,
+            "expected no injection since no window matched"
+        );
+        assert_eq!(window.activated.lock().unwrap().len(), 0);
+
         shutdown_tx.send(()).unwrap();
         run_handle.await.unwrap().unwrap();
     }
