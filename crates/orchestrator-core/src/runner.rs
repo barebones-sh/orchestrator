@@ -146,6 +146,18 @@ impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> R
         }
         state.last_toggle_at = Some(now);
 
+        // A non-looping macro's task ends on its own once it finishes its
+        // steps (see `run_macro`). Detect that here and treat it as the
+        // profile having already self-toggled off, so this press starts a
+        // fresh run instead of "stopping" a task that's already done
+        // (design spec §5.2).
+        if let Some(task) = &state.task {
+            if task.is_finished() {
+                state.running = None;
+                state.task = None;
+            }
+        }
+
         if let Some(cancel) = state.running.take() {
             let _ = cancel.send(());
             if let Some(task) = state.task.take() {
@@ -154,33 +166,108 @@ impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> R
             return;
         }
 
-        let Action::Repeat { input: event, interval_ms, jitter } = &profile.action else {
-            // Action::Macro handling lands in Task 5.
-            return;
-        };
         if !matches!(profile.scope, Scope::Desktop) {
             // Scope::Window handling lands in Task 6.
             return;
         }
 
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         let input = Arc::clone(&self.input);
-        let event = event.clone();
-        let interval_ms = *interval_ms;
-        let jitter = jitter.clone();
-        let task = tokio::spawn(async move {
-            loop {
-                let _ = input.inject(&event).await;
-                let delay = compute_delay(interval_ms, &jitter);
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = &mut cancel_rx => break,
-                }
+
+        let task = match profile.action.clone() {
+            Action::Repeat { input: event, interval_ms, jitter } => {
+                tokio::spawn(run_repeat(input, event, interval_ms, jitter, cancel_rx))
             }
-        });
+            Action::Macro { steps, loop_ } => {
+                tokio::spawn(run_macro(input, steps, loop_, cancel_rx))
+            }
+        };
 
         state.running = Some(cancel_tx);
         state.task = Some(task);
+    }
+}
+
+async fn run_repeat<I: InputInjector>(
+    input: Arc<I>,
+    event: orchestrator_input::InputEvent,
+    interval_ms: u64,
+    jitter: Jitter,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        let _ = input.inject(&event).await;
+        let delay = compute_delay(interval_ms, &jitter);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = &mut cancel_rx => break,
+        }
+    }
+}
+
+async fn run_macro<I: InputInjector>(
+    input: Arc<I>,
+    steps: Vec<crate::action::MacroStep>,
+    loop_: bool,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    use crate::action::{ClickPosition, MacroStep};
+    use orchestrator_input::InputEvent;
+
+    loop {
+        for step in &steps {
+            let delay_ms = match step {
+                MacroStep::KeyPress { delay_ms, .. }
+                | MacroStep::MouseClick { delay_ms, .. }
+                | MacroStep::Drag { delay_ms, .. }
+                | MacroStep::Scroll { delay_ms, .. } => *delay_ms,
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)) => {}
+                _ = &mut cancel_rx => return,
+            }
+
+            match step {
+                MacroStep::KeyPress { combo, .. } => {
+                    let _ = input.inject(&InputEvent::KeyPress(combo.clone())).await;
+                    let _ = input.inject(&InputEvent::KeyRelease(combo.clone())).await;
+                }
+                MacroStep::MouseClick { button, position, .. } => {
+                    if let ClickPosition::Fixed { x, y } = position {
+                        let _ = input
+                            .inject(&InputEvent::MouseMoveAbsolute { x: *x, y: *y })
+                            .await;
+                    }
+                    let _ = input.inject(&InputEvent::MouseButtonPress(*button)).await;
+                    let _ = input.inject(&InputEvent::MouseButtonRelease(*button)).await;
+                }
+                MacroStep::Drag { from, to, .. } => {
+                    if let ClickPosition::Fixed { x, y } = from {
+                        let _ = input
+                            .inject(&InputEvent::MouseMoveAbsolute { x: *x, y: *y })
+                            .await;
+                    }
+                    let _ = input
+                        .inject(&InputEvent::MouseButtonPress(orchestrator_input::MouseButton::Left))
+                        .await;
+                    if let ClickPosition::Fixed { x, y } = to {
+                        let _ = input
+                            .inject(&InputEvent::MouseMoveAbsolute { x: *x, y: *y })
+                            .await;
+                    }
+                    let _ = input
+                        .inject(&InputEvent::MouseButtonRelease(orchestrator_input::MouseButton::Left))
+                        .await;
+                }
+                MacroStep::Scroll { dx, dy, .. } => {
+                    let _ = input.inject(&InputEvent::Scroll { dx: *dx, dy: *dy }).await;
+                }
+            }
+        }
+
+        if !loop_ {
+            break;
+        }
     }
 }
 
@@ -605,6 +692,136 @@ mod toggle_tests {
             "expected the profile to still be running (ignored debounced press), got {count} injections"
         );
 
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod macro_tests {
+    use super::fakes::*;
+    use super::*;
+    use crate::action::{Action, ClickPosition, MacroStep};
+    use crate::profile::{Profile, Scope};
+    use orchestrator_hotkey::{HotkeyEvent, KeyCombo, Modifier};
+    use orchestrator_input::{InputEvent, MouseButton};
+    use std::sync::Arc;
+
+    fn desktop_macro_profile(name: &str, steps: Vec<MacroStep>, loop_: bool, debounce_ms: u32) -> Profile {
+        Profile {
+            name: name.to_string(),
+            trigger: KeyCombo {
+                modifiers: vec![Modifier::Ctrl],
+                key: "F10".to_string(),
+            },
+            action: Action::Macro { steps, loop_ },
+            scope: Scope::Desktop,
+            focus_steal: false,
+            debounce_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn non_looping_macro_runs_once_and_self_toggles_off() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = FakeWindowLocator::new(vec![], None);
+        let steps = vec![
+            MacroStep::Scroll { delay_ms: 5, dx: 0, dy: 1 },
+            MacroStep::Scroll { delay_ms: 5, dx: 0, dy: -1 },
+        ];
+        let profile = desktop_macro_profile("once", steps, false, 50);
+
+        let runner = Runner::<_, FakeInputInjector, _>::new(hotkey, Arc::clone(&input), window, vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let count_after_completion = input.injected.lock().unwrap().len();
+        assert_eq!(
+            count_after_completion, 2,
+            "non-looping macro should inject exactly once per step"
+        );
+
+        // Confirm it self-toggled off: pressing again should start a fresh
+        // run (another 2 injections), not toggle "off" a task that's
+        // already finished.
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(input.injected.lock().unwrap().len(), 4);
+
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn looping_macro_repeats_until_toggled_off() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = FakeWindowLocator::new(vec![], None);
+        let steps = vec![MacroStep::Scroll { delay_ms: 5, dx: 0, dy: 1 }];
+        let profile = desktop_macro_profile("loop", steps, true, 50);
+
+        let runner = Runner::<_, FakeInputInjector, _>::new(hotkey, Arc::clone(&input), window, vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let count = input.injected.lock().unwrap().len();
+        assert!(count >= 3, "expected the loop to have run multiple times, got {count}");
+
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let count_after_stop = input.injected.lock().unwrap().len();
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(count_after_stop, input.injected.lock().unwrap().len());
+
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn mouse_click_at_cursor_skips_the_move_event() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = FakeWindowLocator::new(vec![], None);
+        let steps = vec![MacroStep::MouseClick {
+            delay_ms: 5,
+            button: MouseButton::Left,
+            position: ClickPosition::AtCursor,
+        }];
+        let profile = desktop_macro_profile("click", steps, false, 50);
+
+        let runner = Runner::<_, FakeInputInjector, _>::new(hotkey, Arc::clone(&input), window, vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+        let injected = input.injected.lock().unwrap();
+        assert_eq!(injected.len(), 2, "expected exactly press+release, no move event");
+        assert!(matches!(injected[0], InputEvent::MouseButtonPress(MouseButton::Left)));
+        assert!(matches!(injected[1], InputEvent::MouseButtonRelease(MouseButton::Left)));
+
+        drop(injected);
         shutdown_tx.send(()).unwrap();
         run_handle.await.unwrap().unwrap();
     }
