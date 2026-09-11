@@ -613,12 +613,14 @@ name = "orchestrator-core"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "fastrand",
  "orchestrator-hotkey",
  "orchestrator-input",
  "orchestrator-window",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
