@@ -140,7 +140,7 @@ impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> R
     /// itself. (`connect()` takes `&mut self`, which is incompatible with
     /// the `Arc<I>` sharing `run()` needs for concurrent per-profile
     /// tasks — see the runner design spec §3 vs. this plan's Task 3 note.)
-    pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> Result<(), RunnerError> {
+    pub async fn run(self, shutdown: impl Future<Output = ()>) -> Result<(), RunnerError> {
         let mut id_to_index: HashMap<HotkeyId, usize> = HashMap::new();
         for (index, profile) in self.profiles.iter().enumerate() {
             let (id, _combo) =
@@ -158,16 +158,28 @@ impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> R
         let hotkey_rx = self.hotkey.subscribe();
         // Bridges the backend's sync `subscribe()` channel onto the async
         // world above. Dropping a `JoinHandle` alone does not cancel the
-        // task (per Tokio's documented semantics it only detaches it) --
-        // see `KdePortalHotkeyBackend`'s `Drop` impl (in
-        // `orchestrator-hotkey`) for the same pattern applied to its own
-        // background forwarding task. We keep the handle and `.abort()` it
-        // in the shutdown teardown below. Because the task's own
-        // `hotkey_rx.recv()` is a blocking OS call, `.abort()` can't
-        // interrupt it mid-call -- it only marks the task for cancellation
-        // once that blocking call returns (e.g. on the next event, or when
-        // the underlying channel disconnects), which is the same
-        // best-effort guarantee `KdePortalHotkeyBackend` provides.
+        // task -- it only detaches it, leaving it running in the
+        // background -- so we keep the handle and `.abort()` it in the
+        // shutdown teardown below, echoing the same "keep the handle,
+        // abort on teardown" shape `KdePortalHotkeyBackend`'s `Drop` impl
+        // (in `orchestrator-hotkey`) uses for its own background
+        // forwarding task. The similarity ends there, though: that task is
+        // a regular `tokio::spawn` async task, which actually does stop at
+        // its next `.await` point once aborted. This one is
+        // `spawn_blocking`, and per Tokio's own docs, `.abort()` on a
+        // `spawn_blocking` task has no effect once its closure has started
+        // running -- "the task will continue running normally." Since this
+        // closure spends essentially all its time inside the blocking
+        // `hotkey_rx.recv()` call, `.abort()` here will not stop that OS
+        // thread; it only helps the narrow case where the task hasn't
+        // started running yet. In practice the thread keeps running until
+        // its next event arrives (letting the loop notice the channel's
+        // `tx` half was dropped and exit) or the process exits -- one
+        // bounded stray thread per `Runner`, not an unbounded leak, and an
+        // accepted limitation for this plan's scope rather than a solved
+        // problem. A real fix would restructure this bridge to poll with
+        // `recv_timeout` against a shutdown flag instead of blocking
+        // `recv()`, which is a bigger change than this plan scopes.
         let bridge_task = tokio::task::spawn_blocking(move || {
             while let Ok(item) = hotkey_rx.recv() {
                 if tx.send(item).is_err() {
@@ -204,9 +216,11 @@ impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> R
             self.restore_focus(state).await;
         }
 
-        // Best-effort: see the long comment where `bridge_task` is spawned
-        // above for why `.abort()` here is only a "mark for cancellation"
-        // rather than a guaranteed-immediate stop.
+        // See the comment where `bridge_task` is spawned above: this does
+        // NOT reliably stop the bridge thread's blocking `recv()` if one is
+        // already in progress -- it only handles the narrow race where the
+        // task hasn't started running yet. Kept anyway since it's harmless
+        // and does help that narrow case.
         bridge_task.abort();
 
         Ok(())
@@ -438,19 +452,19 @@ mod fakes {
     pub struct FakeHotkeyBackend {
         pub registered: Mutex<Vec<(String, Option<KeyCombo>)>>,
         next_id: AtomicU64,
-        event_tx: std::sync::mpsc::Sender<(HotkeyId, HotkeyEvent)>,
         event_rx: Mutex<Option<std::sync::mpsc::Receiver<(HotkeyId, HotkeyEvent)>>>,
     }
 
     impl FakeHotkeyBackend {
         /// Returns the fake plus a sender the test uses to push events as
-        /// if a real hotkey had fired.
+        /// if a real hotkey had fired. The fake itself holds no `Sender` --
+        /// the one returned here is the only one, so the test controls the
+        /// channel's lifetime entirely.
         pub fn new() -> (Self, std::sync::mpsc::Sender<(HotkeyId, HotkeyEvent)>) {
             let (tx, rx) = std::sync::mpsc::channel();
             let fake = Self {
                 registered: Mutex::new(Vec::new()),
                 next_id: AtomicU64::new(1),
-                event_tx: tx.clone(),
                 event_rx: Mutex::new(Some(rx)),
             };
             (fake, tx)
@@ -564,7 +578,7 @@ mod fakes {
 #[cfg(test)]
 mod fakes_smoke_tests {
     use super::fakes::*;
-    use orchestrator_hotkey::{HotkeyBackend, HotkeyEvent, HotkeyId};
+    use orchestrator_hotkey::{HotkeyBackend, HotkeyEvent};
     use orchestrator_input::{InputEvent, InputInjector};
     use orchestrator_window::{WindowHandle, WindowInfo, WindowLocator};
 
@@ -982,22 +996,31 @@ mod macro_tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
 
-        let injected = input.injected.lock().unwrap();
-        assert_eq!(
-            injected.len(),
-            2,
-            "expected exactly press+release, no move event"
-        );
-        assert!(matches!(
-            injected[0],
-            InputEvent::MouseButtonPress(MouseButton::Left)
-        ));
-        assert!(matches!(
-            injected[1],
-            InputEvent::MouseButtonRelease(MouseButton::Left)
-        ));
+        // False positive: `injected` is explicitly `drop()`'d at the end of
+        // this block, before the next `.await` -- clippy's
+        // `await_holding_lock` lint operates at function granularity and
+        // can't see that a statement-level `#[allow]` doesn't suppress it,
+        // so the whole block is wrapped instead. It's also a test-only
+        // `std::sync::Mutex` on a fake with no real contention.
+        #[allow(clippy::await_holding_lock)]
+        {
+            let injected = input.injected.lock().unwrap();
+            assert_eq!(
+                injected.len(),
+                2,
+                "expected exactly press+release, no move event"
+            );
+            assert!(matches!(
+                injected[0],
+                InputEvent::MouseButtonPress(MouseButton::Left)
+            ));
+            assert!(matches!(
+                injected[1],
+                InputEvent::MouseButtonRelease(MouseButton::Left)
+            ));
 
-        drop(injected);
+            drop(injected);
+        }
         shutdown_tx.send(()).unwrap();
         run_handle.await.unwrap().unwrap();
     }
@@ -1136,7 +1159,7 @@ mod window_scope_tests {
         );
         assert_eq!(
             window.activated.lock().unwrap().as_slice(),
-            &[target.clone()],
+            std::slice::from_ref(&target),
             "expected exactly one activate_window call (the target) at toggle-on"
         );
 
@@ -1322,15 +1345,28 @@ mod shutdown_and_integration_tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-        let injected = input.injected.lock().unwrap();
-        let scroll_up = injected
-            .iter()
-            .filter(|e| matches!(e, InputEvent::Scroll { dy: 1, dx: 0 }))
-            .count();
-        let scroll_right = injected
-            .iter()
-            .filter(|e| matches!(e, InputEvent::Scroll { dx: 1, dy: 0 }))
-            .count();
+        // False positive: `injected` is explicitly `drop()`'d at the end of
+        // this block, before the next `.await` -- clippy's
+        // `await_holding_lock` lint operates at function granularity, and a
+        // `#[allow]` on a `let` statement doesn't suppress it (only a
+        // bare-block statement does), hence the uninitialized bindings
+        // assigned from inside the attributed block below. It's also a
+        // test-only `std::sync::Mutex` on a fake with no real contention.
+        let scroll_up;
+        let scroll_right;
+        #[allow(clippy::await_holding_lock)]
+        {
+            let injected = input.injected.lock().unwrap();
+            scroll_up = injected
+                .iter()
+                .filter(|e| matches!(e, InputEvent::Scroll { dy: 1, dx: 0 }))
+                .count();
+            scroll_right = injected
+                .iter()
+                .filter(|e| matches!(e, InputEvent::Scroll { dx: 1, dy: 0 }))
+                .count();
+            drop(injected);
+        }
         assert!(
             scroll_up >= 2,
             "expected the desktop repeat profile to have fired, got {scroll_up}"
@@ -1339,7 +1375,6 @@ mod shutdown_and_integration_tests {
             scroll_right >= 2,
             "expected the looping macro profile to have fired, got {scroll_right}"
         );
-        drop(injected);
 
         // Toggle off only the desktop profile; the macro profile keeps running.
         tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
