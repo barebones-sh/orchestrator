@@ -9,7 +9,10 @@ pub trait InputInjector: Send + Sync {
     async fn connect(&mut self) -> Result<(), InjectError>;
 
     /// Inject a single input event.
-    fn inject(&self, event: &InputEvent) -> impl std::future::Future<Output = Result<(), InjectError>> + Send;
+    fn inject(
+        &self,
+        event: &InputEvent,
+    ) -> impl std::future::Future<Output = Result<(), InjectError>> + Send;
 
     /// Query whether this backend requires focus steal for window targeting.
     /// Always true on Wayland backends today; false on X11/macOS with native window targeting.
