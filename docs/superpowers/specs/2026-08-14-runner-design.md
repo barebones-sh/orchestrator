@@ -110,10 +110,10 @@ If `loop_` is true, repeat the whole sequence (checking cancellation between ste
 At toggle-on time only (not re-resolved per tick, per the resolved design decision): `orchestrator-core` (not any trait) does the matching, per the original design spec's disambiguation policy:
 
 1. Call `window.list_windows()`.
-2. Filter by `process_name`; if multiple match, further filter by `window_title_hint`.
+2. Filter by `process_name`; whenever `window_title_hint` is non-empty, further filter by it (title substring match) — this applies regardless of how many `process_name` matches there are, including exactly one, not only when there are multiple. If applying a non-empty hint leaves zero candidates, that is treated as no match at all (see point 5) rather than a silent fallback to the unfiltered `process_name` matches: a hint that matches nothing means the profile's targeting intent can't be satisfied, and toggle-on should fail cleanly instead of silently acting on the wrong window.
 3. Among remaining matches, prefer the entry whose `WindowHandle` equals the profile's stored `backend_hint_id`, if present and still among the matches.
 4. Otherwise, fall back to the first remaining match and log a warning (window IDs aren't stable across restarts — this is expected, not an error condition).
-5. If zero windows match at all, toggle-on fails (§4) — the profile does not start desktop-wide as a silent fallback.
+5. If zero windows match at all — either no `process_name` match, or a non-empty `window_title_hint` that matched nothing among the `process_name` matches — toggle-on fails (§4) — the profile does not start desktop-wide as a silent fallback.
 
 Once resolved, call `window.activate_window(&handle)` exactly once, then start the repeat/macro task (§5). On toggle-off, call `window.activate_window(&previously_focused_handle)` to restore — the previously-focused handle is captured via `window.focused_window()` *before* the toggle-on activation call, mirroring the spike's confirmed activate→inject→restore pattern (`docs/superpowers/specs/2026-08-09-wayland-injection-spike-findings.md`, Phase 3c), just amortized across the whole run instead of once per tick.
 
