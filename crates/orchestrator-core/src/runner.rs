@@ -39,23 +39,69 @@ pub enum RunnerError {
     },
 }
 
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::action::Action;
+use crate::profile::Scope;
+
+struct ProfileState {
+    running: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    last_toggle_at: Option<Instant>,
+}
+
+impl ProfileState {
+    fn new() -> Self {
+        Self {
+            running: None,
+            task: None,
+            last_toggle_at: None,
+        }
+    }
+}
+
 pub struct Runner<H: HotkeyBackend, I: InputInjector, W: WindowLocator> {
     hotkey: H,
-    input: I,
-    window: W,
+    input: Arc<I>,
+    window: Arc<W>,
     profiles: Vec<Profile>,
 }
 
-impl<H: HotkeyBackend, I: InputInjector, W: WindowLocator> Runner<H, I, W> {
-    pub fn new(hotkey: H, input: I, window: W, profiles: Vec<Profile>) -> Self {
+impl<H: HotkeyBackend, I: InputInjector + 'static, W: WindowLocator + 'static> Runner<H, I, W> {
+    pub fn new(hotkey: H, input: I, window: impl Into<Arc<W>>, profiles: Vec<Profile>) -> Self {
         Self {
             hotkey,
-            input,
-            window,
+            input: Arc::new(input),
+            window: window.into(),
             profiles,
         }
     }
 
+    /// Test-only constructor variant accepting an already-shared `Arc<I>`,
+    /// so tests can keep their own clone to inspect after handing the other
+    /// clone into the `Runner` (see design spec's §3 "wrap `input`/`window`
+    /// in `Arc` internally"). Not exposed to real callers: `Runner::new`'s
+    /// `impl Into<Arc<I>>` variant for this parameter was tried first but
+    /// rejected — it collides with `std`'s blanket `impl<T> From<T> for T`
+    /// and `impl<T> From<T> for Arc<T>` impls whenever a caller already
+    /// holds an `Arc<I>` (exactly what these tests need), producing an
+    /// unresolvable `E0283` ambiguity at the call site.
+    #[cfg(test)]
+    fn new_with_shared_input(hotkey: H, input: Arc<I>, window: impl Into<Arc<W>>, profiles: Vec<Profile>) -> Self {
+        Self {
+            hotkey,
+            input,
+            window: window.into(),
+            profiles,
+        }
+    }
+
+    /// `input` must already be connected (see `InputInjector::connect`)
+    /// before constructing a `Runner` — `run()` does not call `connect()`
+    /// itself. (`connect()` takes `&mut self`, which is incompatible with
+    /// the `Arc<I>` sharing `run()` needs for concurrent per-profile
+    /// tasks — see the runner design spec §3 vs. this plan's Task 3 note.)
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> Result<(), RunnerError> {
         let mut id_to_index: HashMap<HotkeyId, usize> = HashMap::new();
         for (index, profile) in self.profiles.iter().enumerate() {
@@ -70,14 +116,6 @@ impl<H: HotkeyBackend, I: InputInjector, W: WindowLocator> Runner<H, I, W> {
             id_to_index.insert(id, index);
         }
 
-        // NOTE: InputInjector::connect() takes &mut self, which is
-        // incompatible with the Arc<I> sharing Task 4 needs for concurrent
-        // per-profile tasks. Rather than call connect() here and rework it
-        // in Task 4, the contract is: callers must connect() the injector
-        // themselves before constructing a Runner (see Runner::new's doc
-        // comment, added in Task 4). This is a real correction to the
-        // design spec's §3 step 2, caught during plan-writing.
-
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let hotkey_rx = self.hotkey.subscribe();
         tokio::task::spawn_blocking(move || {
@@ -88,20 +126,80 @@ impl<H: HotkeyBackend, I: InputInjector, W: WindowLocator> Runner<H, I, W> {
             }
         });
 
+        let mut states: Vec<ProfileState> = self.profiles.iter().map(|_| ProfileState::new()).collect();
+
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
-                Some((_id, _event)) = rx.recv() => {
-                    // Toggle dispatch lands in Task 4 — this task only
-                    // proves the skeleton loop structure and startup
-                    // sequence.
+                Some((id, event)) = rx.recv() => {
+                    if !matches!(event, HotkeyEvent::Pressed) {
+                        continue;
+                    }
+                    let Some(&index) = id_to_index.get(&id) else { continue };
+                    self.handle_press(index, &mut states[index]).await;
                 }
                 else => break,
             }
         }
 
+        for state in &mut states {
+            if let Some(cancel) = state.running.take() {
+                let _ = cancel.send(());
+            }
+            if let Some(task) = state.task.take() {
+                let _ = task.await;
+            }
+        }
+
         Ok(())
+    }
+
+    async fn handle_press(&self, index: usize, state: &mut ProfileState) {
+        let profile = &self.profiles[index];
+        let now = Instant::now();
+        if let Some(last) = state.last_toggle_at {
+            if now.duration_since(last) < std::time::Duration::from_millis(profile.debounce_ms as u64) {
+                return;
+            }
+        }
+        state.last_toggle_at = Some(now);
+
+        if let Some(cancel) = state.running.take() {
+            let _ = cancel.send(());
+            if let Some(task) = state.task.take() {
+                let _ = task.await;
+            }
+            return;
+        }
+
+        let Action::Repeat { input: event, interval_ms, jitter } = &profile.action else {
+            // Action::Macro handling lands in Task 5.
+            return;
+        };
+        if !matches!(profile.scope, Scope::Desktop) {
+            // Scope::Window handling lands in Task 6.
+            return;
+        }
+
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let input = Arc::clone(&self.input);
+        let event = event.clone();
+        let interval_ms = *interval_ms;
+        let jitter = jitter.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let _ = input.inject(&event).await;
+                let delay = compute_delay(interval_ms, &jitter);
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = &mut cancel_rx => break,
+                }
+            }
+        });
+
+        state.running = Some(cancel_tx);
+        state.task = Some(task);
     }
 }
 
@@ -400,5 +498,133 @@ mod startup_tests {
             start.elapsed() < std::time::Duration::from_millis(500),
             "run() took too long to return after an already-resolved shutdown future"
         );
+    }
+}
+
+#[cfg(test)]
+mod toggle_tests {
+    use super::fakes::*;
+    use super::*;
+    use crate::action::{Action, Jitter};
+    use crate::profile::{Profile, Scope};
+    use orchestrator_hotkey::{HotkeyEvent, KeyCombo, Modifier};
+    use orchestrator_input::InputEvent;
+    use std::sync::Arc;
+
+    fn desktop_repeat_profile(name: &str, interval_ms: u64, debounce_ms: u32) -> Profile {
+        Profile {
+            name: name.to_string(),
+            trigger: KeyCombo {
+                modifiers: vec![Modifier::Ctrl],
+                key: "F9".to_string(),
+            },
+            action: Action::Repeat {
+                input: InputEvent::Scroll { dx: 0, dy: 1 },
+                interval_ms,
+                jitter: Jitter::None,
+            },
+            scope: Scope::Desktop,
+            focus_steal: false,
+            debounce_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn pressing_hotkey_starts_repeating_injection() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = FakeWindowLocator::new(vec![], None);
+        let profile = desktop_repeat_profile("clicker", 20, 400);
+
+        let runner = Runner::new_with_shared_input(hotkey, Arc::clone(&input), window, vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        // Give startup (registration) time to complete, then simulate a
+        // press. The fake hands back HotkeyId(1) for the first registered
+        // action (see FakeHotkeyBackend::register's sequential id
+        // assignment).
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let count_while_running = input.injected.lock().unwrap().len();
+        assert!(
+            count_while_running >= 2,
+            "expected multiple injections in 100ms at a 20ms interval, got {count_while_running}"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pressing_hotkey_twice_toggles_off_and_stops_injecting() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = FakeWindowLocator::new(vec![], None);
+        let profile = desktop_repeat_profile("clicker", 20, 50);
+
+        let runner = Runner::new_with_shared_input(hotkey, Arc::clone(&input), window, vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await; // > debounce_ms
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let count_after_stop = input.injected.lock().unwrap().len();
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let count_later = input.injected.lock().unwrap().len();
+        assert_eq!(
+            count_after_stop, count_later,
+            "injection count changed after toggle-off; repeat task wasn't cancelled"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn second_press_within_debounce_window_is_ignored() {
+        let (hotkey, tx) = FakeHotkeyBackend::new();
+        let input = Arc::new(FakeInputInjector::new());
+        let window = FakeWindowLocator::new(vec![], None);
+        let profile = desktop_repeat_profile("clicker", 20, 400); // long debounce
+
+        let runner = Runner::new_with_shared_input(hotkey, Arc::clone(&input), window, vec![profile]);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_handle = tokio::spawn(runner.run(async {
+            let _ = shutdown_rx.await;
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // Second press arrives well within the 400ms debounce window --
+        // must be ignored, so the profile stays "on" and keeps injecting.
+        tx.send((orchestrator_hotkey::HotkeyId(1), HotkeyEvent::Pressed))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let count = input.injected.lock().unwrap().len();
+        assert!(
+            count >= 3,
+            "expected the profile to still be running (ignored debounced press), got {count} injections"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        run_handle.await.unwrap().unwrap();
     }
 }
