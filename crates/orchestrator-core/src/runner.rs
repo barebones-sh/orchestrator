@@ -21,6 +21,90 @@ pub(crate) fn compute_delay(interval_ms: u64, jitter: &Jitter) -> std::time::Dur
     std::time::Duration::from_millis(millis)
 }
 
+use orchestrator_hotkey::{HotkeyBackend, HotkeyEvent, HotkeyId};
+use orchestrator_input::InputInjector;
+use orchestrator_window::WindowLocator;
+use std::collections::HashMap;
+use std::future::Future;
+
+use crate::profile::Profile;
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunnerError {
+    #[error("failed to register hotkey for profile {profile_name:?}: {source}")]
+    HotkeyRegistration {
+        profile_name: String,
+        #[source]
+        source: orchestrator_hotkey::HotkeyError,
+    },
+}
+
+pub struct Runner<H: HotkeyBackend, I: InputInjector, W: WindowLocator> {
+    hotkey: H,
+    input: I,
+    window: W,
+    profiles: Vec<Profile>,
+}
+
+impl<H: HotkeyBackend, I: InputInjector, W: WindowLocator> Runner<H, I, W> {
+    pub fn new(hotkey: H, input: I, window: W, profiles: Vec<Profile>) -> Self {
+        Self {
+            hotkey,
+            input,
+            window,
+            profiles,
+        }
+    }
+
+    pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> Result<(), RunnerError> {
+        let mut id_to_index: HashMap<HotkeyId, usize> = HashMap::new();
+        for (index, profile) in self.profiles.iter().enumerate() {
+            let (id, _combo) = self
+                .hotkey
+                .register(&profile.name, None)
+                .await
+                .map_err(|source| RunnerError::HotkeyRegistration {
+                    profile_name: profile.name.clone(),
+                    source,
+                })?;
+            id_to_index.insert(id, index);
+        }
+
+        // NOTE: InputInjector::connect() takes &mut self, which is
+        // incompatible with the Arc<I> sharing Task 4 needs for concurrent
+        // per-profile tasks. Rather than call connect() here and rework it
+        // in Task 4, the contract is: callers must connect() the injector
+        // themselves before constructing a Runner (see Runner::new's doc
+        // comment, added in Task 4). This is a real correction to the
+        // design spec's §3 step 2, caught during plan-writing.
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let hotkey_rx = self.hotkey.subscribe();
+        tokio::task::spawn_blocking(move || {
+            while let Ok(item) = hotkey_rx.recv() {
+                if tx.send(item).is_err() {
+                    break;
+                }
+            }
+        });
+
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                Some((_id, _event)) = rx.recv() => {
+                    // Toggle dispatch lands in Task 4 — this task only
+                    // proves the skeleton loop structure and startup
+                    // sequence.
+                }
+                else => break,
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +325,80 @@ mod fakes_smoke_tests {
 
         locator.activate_window(&handle).await.unwrap();
         assert_eq!(locator.activated.lock().unwrap().as_slice(), &[handle]);
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::fakes::*;
+    use super::*;
+    use crate::action::{Action, Jitter};
+    use crate::profile::{Profile, Scope};
+    use orchestrator_hotkey::{KeyCombo, Modifier};
+    use orchestrator_input::InputEvent;
+
+    fn desktop_repeat_profile(name: &str) -> Profile {
+        Profile {
+            name: name.to_string(),
+            trigger: KeyCombo {
+                modifiers: vec![Modifier::Ctrl],
+                key: "F9".to_string(),
+            },
+            action: Action::Repeat {
+                input: InputEvent::Scroll { dx: 0, dy: 1 },
+                interval_ms: 100,
+                jitter: Jitter::None,
+            },
+            scope: Scope::Desktop,
+            focus_steal: false,
+            debounce_ms: 400,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_registers_one_hotkey_per_profile() {
+        let (hotkey, _tx) = FakeHotkeyBackend::new();
+        let input = FakeInputInjector::new();
+        let window = FakeWindowLocator::new(vec![], None);
+        let profiles = vec![
+            desktop_repeat_profile("a"),
+            desktop_repeat_profile("b"),
+        ];
+
+        let runner = Runner::new(hotkey, input, window, profiles);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        shutdown_tx.send(()).unwrap();
+
+        // Registration must have happened even though we shut down
+        // immediately after — but we can't inspect `hotkey.registered`
+        // after moving it into `runner`. Instead, this test asserts via
+        // the returned Ok(()) that startup (including registration)
+        // completed without error for two profiles; Task 4 adds a variant
+        // of this test that keeps a handle to assert call counts directly
+        // by restructuring fakes to be Arc-shared (see Task 4's own test
+        // for that pattern).
+        let result = runner
+            .run(async {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_returns_promptly_on_immediate_shutdown() {
+        let (hotkey, _tx) = FakeHotkeyBackend::new();
+        let input = FakeInputInjector::new();
+        let window = FakeWindowLocator::new(vec![], None);
+        let profiles = vec![desktop_repeat_profile("only")];
+
+        let runner = Runner::new(hotkey, input, window, profiles);
+        let start = std::time::Instant::now();
+        let result = runner.run(async {}).await;
+        assert!(result.is_ok());
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "run() took too long to return after an already-resolved shutdown future"
+        );
     }
 }
