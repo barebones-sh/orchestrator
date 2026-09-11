@@ -11,6 +11,8 @@ pub mod action;
 pub mod config;
 pub mod error;
 pub mod profile;
+#[cfg(feature = "runner")]
+pub mod runner;
 
 pub use action::*;
 pub use config::*;
