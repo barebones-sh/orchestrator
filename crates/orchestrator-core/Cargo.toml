@@ -17,7 +17,7 @@ default = []
 kde = ["orchestrator-hotkey/kde", "orchestrator-window/kde"]
 wayland = ["orchestrator-input/wayland"]
 macos = ["orchestrator-hotkey/macos", "orchestrator-window/macos", "orchestrator-input/macos"]
-runner = ["dep:tokio"]
+runner = ["dep:tokio", "dep:tracing"]
 
 [dependencies]
 serde = { workspace = true }
@@ -29,6 +29,7 @@ orchestrator-hotkey = { path = "../orchestrator-hotkey", default-features = fals
 orchestrator-input  = { path = "../orchestrator-input",  default-features = false }
 orchestrator-window = { path = "../orchestrator-window", default-features = false }
 tokio = { workspace = true, optional = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
