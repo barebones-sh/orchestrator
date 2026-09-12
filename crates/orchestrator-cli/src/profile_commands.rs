@@ -7,6 +7,13 @@ use orchestrator_core::action::{Action, Jitter};
 use orchestrator_core::profile::{Profile, Scope};
 use orchestrator_core::Config;
 use orchestrator_hotkey::KeyCombo;
+// Only referenced from `mod tests` below (constructing expected
+// `InputEvent::KeyPress`/etc. values to assert against) -- a non-test build
+// never names `InputEvent` directly, so an unconditional import here is
+// flagged dead by both plain `cargo build` and `cargo clippy`. Gating it
+// under `#[cfg(test)]` keeps it available to `mod tests`'s `use super::*;`
+// while compiling out (and un-flagging) the unused case for real builds.
+#[cfg(test)]
 use orchestrator_input::InputEvent;
 use orchestrator_window::WindowInfo;
 
@@ -28,15 +35,23 @@ impl std::fmt::Display for ProfileCommandError {
         match self {
             Self::Notation(msg) => write!(f, "{msg}"),
             Self::NoSuchProfile(name) => write!(f, "no profile named {name:?}"),
-            Self::DuplicateProfileName(name) => write!(f, "a profile named {name:?} already exists"),
+            Self::DuplicateProfileName(name) => {
+                write!(f, "a profile named {name:?} already exists")
+            }
             Self::NoWindowsAvailable => write!(f, "no windows are currently open to choose from"),
             Self::WindowIndexOutOfRange { chosen, available } => {
-                write!(f, "chosen window index {chosen} is out of range (0..{available})")
+                write!(
+                    f,
+                    "chosen window index {chosen} is out of range (0..{available})"
+                )
             }
             Self::MissingRequiredField(field) => write!(f, "--{field} is required"),
-            Self::RepeatAndMacroBothOrNeitherSpecified => {
-                write!(f, "specify exactly one of --action repeat or --action macro")
-            }
+            Self::RepeatAndMacroBothOrNeitherSpecified => write!(
+                f,
+                "--action repeat's fields (--input/--interval-ms) and --action macro's \
+                 fields (--step/--loop) cannot both be given at once -- only supply the \
+                 fields for the --action you chose"
+            ),
         }
     }
 }
@@ -50,13 +65,23 @@ impl From<NotationError> for ProfileCommandError {
 }
 
 fn placeholder_trigger() -> KeyCombo {
-    KeyCombo { modifiers: vec![], key: String::new() }
+    KeyCombo {
+        modifiers: vec![],
+        key: String::new(),
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum ProfileActionArgs {
-    Repeat { input: String, interval_ms: u64, jitter_ms: Option<u64> },
-    Macro { steps: Vec<String>, loop_: bool },
+    Repeat {
+        input: String,
+        interval_ms: u64,
+        jitter_ms: Option<u64>,
+    },
+    Macro {
+        steps: Vec<String>,
+        loop_: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -74,14 +99,19 @@ pub struct ProfileEditArgs {
     pub debounce_ms: Option<u32>,
 }
 
-pub fn resolve_window_scope(windows: &[WindowInfo], chosen_index: usize) -> Result<Scope, ProfileCommandError> {
+pub fn resolve_window_scope(
+    windows: &[WindowInfo],
+    chosen_index: usize,
+) -> Result<Scope, ProfileCommandError> {
     if windows.is_empty() {
         return Err(ProfileCommandError::NoWindowsAvailable);
     }
-    let window = windows.get(chosen_index).ok_or(ProfileCommandError::WindowIndexOutOfRange {
-        chosen: chosen_index,
-        available: windows.len(),
-    })?;
+    let window = windows
+        .get(chosen_index)
+        .ok_or(ProfileCommandError::WindowIndexOutOfRange {
+            chosen: chosen_index,
+            available: windows.len(),
+        })?;
     Ok(Scope::Window {
         process_name: window.process_name.clone().unwrap_or_default(),
         window_title_hint: window.title.clone(),
@@ -91,17 +121,33 @@ pub fn resolve_window_scope(windows: &[WindowInfo], chosen_index: usize) -> Resu
 
 fn build_action(args: &ProfileActionArgs) -> Result<Action, ProfileCommandError> {
     match args {
-        ProfileActionArgs::Repeat { input, interval_ms, jitter_ms } => {
+        ProfileActionArgs::Repeat {
+            input,
+            interval_ms,
+            jitter_ms,
+        } => {
             let event = parse_repeat_input(input)?;
             let jitter = match jitter_ms {
-                Some(range_ms) => Jitter::Uniform { range_ms: *range_ms },
+                Some(range_ms) => Jitter::Uniform {
+                    range_ms: *range_ms,
+                },
                 None => Jitter::None,
             };
-            Ok(Action::Repeat { input: event, interval_ms: *interval_ms, jitter })
+            Ok(Action::Repeat {
+                input: event,
+                interval_ms: *interval_ms,
+                jitter,
+            })
         }
         ProfileActionArgs::Macro { steps, loop_ } => {
-            let parsed_steps = steps.iter().map(|s| parse_macro_step(s)).collect::<Result<Vec<_>, _>>()?;
-            Ok(Action::Macro { steps: parsed_steps, loop_: *loop_ })
+            let parsed_steps = steps
+                .iter()
+                .map(|s| parse_macro_step(s))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Action::Macro {
+                steps: parsed_steps,
+                loop_: *loop_,
+            })
         }
     }
 }
@@ -127,7 +173,11 @@ pub fn add_profile(config: &mut Config, args: ProfileAddArgs) -> Result<(), Prof
     Ok(())
 }
 
-pub fn edit_profile(config: &mut Config, name: &str, args: ProfileEditArgs) -> Result<(), ProfileCommandError> {
+pub fn edit_profile(
+    config: &mut Config,
+    name: &str,
+    args: ProfileEditArgs,
+) -> Result<(), ProfileCommandError> {
     // Resolve every fallible field BEFORE writing anything to the profile,
     // so a rejected edit (e.g. bad notation in `args.action`) is a true
     // no-op rather than leaving other fields (like scope/focus_steal)
@@ -174,12 +224,22 @@ pub fn format_profile_list(config: &Config) -> String {
             Scope::Window { process_name, .. } => format!("Window({process_name})"),
         };
         let action_summary = match &profile.action {
-            Action::Repeat { interval_ms, jitter, .. } => match jitter {
+            Action::Repeat {
+                interval_ms,
+                jitter,
+                ..
+            } => match jitter {
                 Jitter::None => format!("Repeat every {interval_ms}ms\u{00b1}no jitter"),
-                Jitter::Uniform { range_ms } => format!("Repeat every {interval_ms}ms\u{00b1}{range_ms}ms"),
+                Jitter::Uniform { range_ms } => {
+                    format!("Repeat every {interval_ms}ms\u{00b1}{range_ms}ms")
+                }
             },
             Action::Macro { steps, loop_ } => {
-                format!("Macro ({} steps, {})", steps.len(), if *loop_ { "looping" } else { "once" })
+                format!(
+                    "Macro ({} steps, {})",
+                    steps.len(),
+                    if *loop_ { "looping" } else { "once" }
+                )
             }
         };
         out.push_str(&format!(
@@ -196,13 +256,26 @@ mod tests {
     use orchestrator_window::WindowHandle;
 
     fn empty_config() -> Config {
-        Config { schema_version: orchestrator_core::config::CURRENT_SCHEMA_VERSION, profiles: vec![] }
+        Config {
+            schema_version: orchestrator_core::config::CURRENT_SCHEMA_VERSION,
+            profiles: vec![],
+        }
     }
 
     fn sample_windows() -> Vec<WindowInfo> {
         vec![
-            WindowInfo { handle: WindowHandle("h1".to_string()), pid: Some(1), process_name: Some("firefox".to_string()), title: "Mozilla Firefox".to_string() },
-            WindowInfo { handle: WindowHandle("h2".to_string()), pid: Some(2), process_name: Some("code".to_string()), title: "orchestrator - VS Code".to_string() },
+            WindowInfo {
+                handle: WindowHandle("h1".to_string()),
+                pid: Some(1),
+                process_name: Some("firefox".to_string()),
+                title: "Mozilla Firefox".to_string(),
+            },
+            WindowInfo {
+                handle: WindowHandle("h2".to_string()),
+                pid: Some(2),
+                process_name: Some("code".to_string()),
+                title: "orchestrator - VS Code".to_string(),
+            },
         ]
     }
 
@@ -224,7 +297,13 @@ mod tests {
     #[test]
     fn resolve_window_scope_rejects_out_of_range_index() {
         let err = resolve_window_scope(&sample_windows(), 5).unwrap_err();
-        assert_eq!(err, ProfileCommandError::WindowIndexOutOfRange { chosen: 5, available: 2 });
+        assert_eq!(
+            err,
+            ProfileCommandError::WindowIndexOutOfRange {
+                chosen: 5,
+                available: 2
+            }
+        );
     }
 
     #[test]
@@ -241,7 +320,11 @@ mod tests {
         let args = ProfileAddArgs {
             name: "clicker".to_string(),
             scope: Scope::Desktop,
-            action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: None },
+            action: ProfileActionArgs::Repeat {
+                input: "key:A".to_string(),
+                interval_ms: 100,
+                jitter_ms: None,
+            },
             debounce_ms: None,
         };
         add_profile(&mut config, args).unwrap();
@@ -249,12 +332,31 @@ mod tests {
         assert_eq!(config.profiles.len(), 1);
         let profile = &config.profiles[0];
         assert_eq!(profile.name, "clicker");
-        assert_eq!(profile.trigger, KeyCombo { modifiers: vec![], key: String::new() });
-        assert!(!profile.focus_steal, "Scope::Desktop must derive focus_steal = false");
-        assert_eq!(profile.debounce_ms, 400, "omitted debounce_ms must default to 400");
+        assert_eq!(
+            profile.trigger,
+            KeyCombo {
+                modifiers: vec![],
+                key: String::new()
+            }
+        );
+        assert!(
+            !profile.focus_steal,
+            "Scope::Desktop must derive focus_steal = false"
+        );
+        assert_eq!(
+            profile.debounce_ms, 400,
+            "omitted debounce_ms must default to 400"
+        );
         assert_eq!(
             profile.action,
-            Action::Repeat { input: InputEvent::KeyPress(KeyCombo { modifiers: vec![], key: "A".to_string() }), interval_ms: 100, jitter: Jitter::None }
+            Action::Repeat {
+                input: InputEvent::KeyPress(KeyCombo {
+                    modifiers: vec![],
+                    key: "A".to_string()
+                }),
+                interval_ms: 100,
+                jitter: Jitter::None
+            }
         );
     }
 
@@ -264,12 +366,19 @@ mod tests {
         let args = |name: &str| ProfileAddArgs {
             name: name.to_string(),
             scope: Scope::Desktop,
-            action: ProfileActionArgs::Repeat { input: "scroll:0,1".to_string(), interval_ms: 50, jitter_ms: None },
+            action: ProfileActionArgs::Repeat {
+                input: "scroll:0,1".to_string(),
+                interval_ms: 50,
+                jitter_ms: None,
+            },
             debounce_ms: None,
         };
         add_profile(&mut config, args("dup")).unwrap();
         let err = add_profile(&mut config, args("dup")).unwrap_err();
-        assert_eq!(err, ProfileCommandError::DuplicateProfileName("dup".to_string()));
+        assert_eq!(
+            err,
+            ProfileCommandError::DuplicateProfileName("dup".to_string())
+        );
     }
 
     #[test]
@@ -277,8 +386,16 @@ mod tests {
         let mut config = empty_config();
         let args = ProfileAddArgs {
             name: "windowed".to_string(),
-            scope: Scope::Window { process_name: "firefox".to_string(), window_title_hint: "Mozilla Firefox".to_string(), backend_hint_id: Some("h1".to_string()) },
-            action: ProfileActionArgs::Repeat { input: "scroll:0,-1".to_string(), interval_ms: 100, jitter_ms: None },
+            scope: Scope::Window {
+                process_name: "firefox".to_string(),
+                window_title_hint: "Mozilla Firefox".to_string(),
+                backend_hint_id: Some("h1".to_string()),
+            },
+            action: ProfileActionArgs::Repeat {
+                input: "scroll:0,-1".to_string(),
+                interval_ms: 100,
+                jitter_ms: None,
+            },
             debounce_ms: Some(250),
         };
         add_profile(&mut config, args).unwrap();
@@ -292,7 +409,10 @@ mod tests {
         let args = ProfileAddArgs {
             name: "macro-one".to_string(),
             scope: Scope::Desktop,
-            action: ProfileActionArgs::Macro { steps: vec!["scroll:0,1:20".to_string(), "key:Ctrl+C:50".to_string()], loop_: true },
+            action: ProfileActionArgs::Macro {
+                steps: vec!["scroll:0,1:20".to_string(), "key:Ctrl+C:50".to_string()],
+                loop_: true,
+            },
             debounce_ms: None,
         };
         add_profile(&mut config, args).unwrap();
@@ -311,7 +431,11 @@ mod tests {
         let args = ProfileAddArgs {
             name: "bad".to_string(),
             scope: Scope::Desktop,
-            action: ProfileActionArgs::Repeat { input: "click:left:cursor".to_string(), interval_ms: 100, jitter_ms: None },
+            action: ProfileActionArgs::Repeat {
+                input: "click:left:cursor".to_string(),
+                interval_ms: 100,
+                jitter_ms: None,
+            },
             debounce_ms: None,
         };
         let err = add_profile(&mut config, args).unwrap_err();
@@ -323,39 +447,87 @@ mod tests {
     #[test]
     fn edit_profile_overwrites_only_given_fields() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs {
-            name: "target".to_string(),
-            scope: Scope::Desktop,
-            action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: None },
-            debounce_ms: Some(400),
-        }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "target".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                },
+                debounce_ms: Some(400),
+            },
+        )
+        .unwrap();
 
-        edit_profile(&mut config, "target", ProfileEditArgs { action: Some(ProfileActionArgs::Repeat { input: "key:B".to_string(), interval_ms: 200, jitter_ms: None }), scope: None, debounce_ms: None }).unwrap();
+        edit_profile(
+            &mut config,
+            "target",
+            ProfileEditArgs {
+                action: Some(ProfileActionArgs::Repeat {
+                    input: "key:B".to_string(),
+                    interval_ms: 200,
+                    jitter_ms: None,
+                }),
+                scope: None,
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
 
         let profile = &config.profiles[0];
-        assert_eq!(profile.debounce_ms, 400, "debounce_ms must be unchanged when not given to edit");
+        assert_eq!(
+            profile.debounce_ms, 400,
+            "debounce_ms must be unchanged when not given to edit"
+        );
         assert_eq!(
             profile.action,
-            Action::Repeat { input: InputEvent::KeyPress(KeyCombo { modifiers: vec![], key: "B".to_string() }), interval_ms: 200, jitter: Jitter::None }
+            Action::Repeat {
+                input: InputEvent::KeyPress(KeyCombo {
+                    modifiers: vec![],
+                    key: "B".to_string()
+                }),
+                interval_ms: 200,
+                jitter: Jitter::None
+            }
         );
     }
 
     #[test]
     fn edit_profile_errors_for_unknown_name() {
         let mut config = empty_config();
-        let err = edit_profile(&mut config, "nope", ProfileEditArgs { action: None, scope: None, debounce_ms: None }).unwrap_err();
+        let err = edit_profile(
+            &mut config,
+            "nope",
+            ProfileEditArgs {
+                action: None,
+                scope: None,
+                debounce_ms: None,
+            },
+        )
+        .unwrap_err();
         assert_eq!(err, ProfileCommandError::NoSuchProfile("nope".to_string()));
     }
 
     #[test]
     fn edit_profile_is_atomic_when_action_notation_fails() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs {
-            name: "target".to_string(),
-            scope: Scope::Desktop,
-            action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: None },
-            debounce_ms: Some(400),
-        }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "target".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                },
+                debounce_ms: Some(400),
+            },
+        )
+        .unwrap();
 
         let original_action = config.profiles[0].action.clone();
 
@@ -372,7 +544,11 @@ mod tests {
                     window_title_hint: "Mozilla Firefox".to_string(),
                     backend_hint_id: None,
                 }),
-                action: Some(ProfileActionArgs::Repeat { input: "click:left:cursor".to_string(), interval_ms: 100, jitter_ms: None }),
+                action: Some(ProfileActionArgs::Repeat {
+                    input: "click:left:cursor".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                }),
                 debounce_ms: None,
             },
         )
@@ -380,20 +556,38 @@ mod tests {
 
         assert!(matches!(err, ProfileCommandError::Notation(_)));
         let profile = &config.profiles[0];
-        assert_eq!(profile.scope, Scope::Desktop, "scope must be unchanged when the edit as a whole fails");
-        assert!(!profile.focus_steal, "focus_steal must be unchanged when the edit as a whole fails");
-        assert_eq!(profile.action, original_action, "action must be unchanged when the edit as a whole fails");
+        assert_eq!(
+            profile.scope,
+            Scope::Desktop,
+            "scope must be unchanged when the edit as a whole fails"
+        );
+        assert!(
+            !profile.focus_steal,
+            "focus_steal must be unchanged when the edit as a whole fails"
+        );
+        assert_eq!(
+            profile.action, original_action,
+            "action must be unchanged when the edit as a whole fails"
+        );
     }
 
     #[test]
     fn edit_profile_scope_only_change_flips_focus_steal() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs {
-            name: "target".to_string(),
-            scope: Scope::Desktop,
-            action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: None },
-            debounce_ms: None,
-        }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "target".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
         assert!(!config.profiles[0].focus_steal);
 
         edit_profile(
@@ -410,10 +604,25 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(config.profiles[0].focus_steal, "Desktop -> Window edit must flip focus_steal to true");
+        assert!(
+            config.profiles[0].focus_steal,
+            "Desktop -> Window edit must flip focus_steal to true"
+        );
 
-        edit_profile(&mut config, "target", ProfileEditArgs { scope: Some(Scope::Desktop), action: None, debounce_ms: None }).unwrap();
-        assert!(!config.profiles[0].focus_steal, "Window -> Desktop edit must flip focus_steal back to false");
+        edit_profile(
+            &mut config,
+            "target",
+            ProfileEditArgs {
+                scope: Some(Scope::Desktop),
+                action: None,
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            !config.profiles[0].focus_steal,
+            "Window -> Desktop edit must flip focus_steal back to false"
+        );
     }
 
     // -- remove_profile --------------------------------------------------------
@@ -421,7 +630,20 @@ mod tests {
     #[test]
     fn remove_profile_removes_by_name() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs { name: "gone".to_string(), scope: Scope::Desktop, action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: None }, debounce_ms: None }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "gone".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
         remove_profile(&mut config, "gone").unwrap();
         assert!(config.profiles.is_empty());
     }
@@ -438,9 +660,25 @@ mod tests {
     #[test]
     fn format_profile_list_repeat_with_jitter_matches_full_expected_line() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs { name: "p1".to_string(), scope: Scope::Desktop, action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: Some(20) }, debounce_ms: None }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "p1".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: Some(20),
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
         let listing = format_profile_list(&config);
-        assert_eq!(listing, "p1\tDesktop\tRepeat every 100ms\u{00b1}20ms\tdebounce=400ms\n");
+        assert_eq!(
+            listing,
+            "p1\tDesktop\tRepeat every 100ms\u{00b1}20ms\tdebounce=400ms\n"
+        );
     }
 
     #[test]
@@ -449,47 +687,98 @@ mod tests {
         // <interval_ms>ms±<jitter or "no jitter">` -- even with no jitter,
         // the `±` and a placeholder must appear, not be dropped entirely.
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs { name: "p2".to_string(), scope: Scope::Desktop, action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 100, jitter_ms: None }, debounce_ms: None }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "p2".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
         let listing = format_profile_list(&config);
-        assert_eq!(listing, "p2\tDesktop\tRepeat every 100ms\u{00b1}no jitter\tdebounce=400ms\n");
+        assert_eq!(
+            listing,
+            "p2\tDesktop\tRepeat every 100ms\u{00b1}no jitter\tdebounce=400ms\n"
+        );
     }
 
     #[test]
     fn format_profile_list_window_scope_matches_full_expected_line() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs {
-            name: "p3".to_string(),
-            scope: Scope::Window { process_name: "firefox".to_string(), window_title_hint: "Mozilla Firefox".to_string(), backend_hint_id: Some("h1".to_string()) },
-            action: ProfileActionArgs::Repeat { input: "key:A".to_string(), interval_ms: 50, jitter_ms: None },
-            debounce_ms: Some(250),
-        }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "p3".to_string(),
+                scope: Scope::Window {
+                    process_name: "firefox".to_string(),
+                    window_title_hint: "Mozilla Firefox".to_string(),
+                    backend_hint_id: Some("h1".to_string()),
+                },
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 50,
+                    jitter_ms: None,
+                },
+                debounce_ms: Some(250),
+            },
+        )
+        .unwrap();
         let listing = format_profile_list(&config);
-        assert_eq!(listing, "p3\tWindow(firefox)\tRepeat every 50ms\u{00b1}no jitter\tdebounce=250ms\n");
+        assert_eq!(
+            listing,
+            "p3\tWindow(firefox)\tRepeat every 50ms\u{00b1}no jitter\tdebounce=250ms\n"
+        );
     }
 
     #[test]
     fn format_profile_list_macro_matches_full_expected_line() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs {
-            name: "p4".to_string(),
-            scope: Scope::Desktop,
-            action: ProfileActionArgs::Macro { steps: vec!["scroll:0,1:20".to_string(), "key:Ctrl+C:50".to_string()], loop_: true },
-            debounce_ms: None,
-        }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "p4".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Macro {
+                    steps: vec!["scroll:0,1:20".to_string(), "key:Ctrl+C:50".to_string()],
+                    loop_: true,
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
         let listing = format_profile_list(&config);
-        assert_eq!(listing, "p4\tDesktop\tMacro (2 steps, looping)\tdebounce=400ms\n");
+        assert_eq!(
+            listing,
+            "p4\tDesktop\tMacro (2 steps, looping)\tdebounce=400ms\n"
+        );
     }
 
     #[test]
     fn format_profile_list_macro_once_matches_full_expected_line() {
         let mut config = empty_config();
-        add_profile(&mut config, ProfileAddArgs {
-            name: "p5".to_string(),
-            scope: Scope::Desktop,
-            action: ProfileActionArgs::Macro { steps: vec!["scroll:0,1:20".to_string()], loop_: false },
-            debounce_ms: None,
-        }).unwrap();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "p5".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Macro {
+                    steps: vec!["scroll:0,1:20".to_string()],
+                    loop_: false,
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
         let listing = format_profile_list(&config);
-        assert_eq!(listing, "p5\tDesktop\tMacro (1 steps, once)\tdebounce=400ms\n");
+        assert_eq!(
+            listing,
+            "p5\tDesktop\tMacro (1 steps, once)\tdebounce=400ms\n"
+        );
     }
 }

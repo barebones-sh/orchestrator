@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 mod notation;
 mod profile_commands;
 
-use profile_commands::{ProfileActionArgs, ProfileAddArgs, ProfileEditArgs};
+use profile_commands::{ProfileActionArgs, ProfileAddArgs, ProfileCommandError, ProfileEditArgs};
 
 /// Orchestrator: global-hotkey input automation.
 #[derive(Parser)]
@@ -98,11 +98,16 @@ enum ActionArg {
 // resolve the `tokio` crate at all.
 #[cfg(target_os = "linux")]
 fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("failed to build tokio runtime")
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
 }
 
 fn config_path(override_path: &Option<std::path::PathBuf>) -> std::path::PathBuf {
-    override_path.clone().unwrap_or_else(orchestrator_core::Config::config_path)
+    override_path
+        .clone()
+        .unwrap_or_else(orchestrator_core::Config::config_path)
 }
 
 fn load_or_default_config(path: &std::path::Path) -> orchestrator_core::Config {
@@ -118,7 +123,17 @@ fn main() {
 
     match cli.command {
         None => {}
-        Some(Command::Profile(ProfileCommand::Add { name, scope, action, input, interval_ms, jitter_ms, step, r#loop, debounce_ms })) => {
+        Some(Command::Profile(ProfileCommand::Add {
+            name,
+            scope,
+            action,
+            input,
+            interval_ms,
+            jitter_ms,
+            step,
+            r#loop,
+            debounce_ms,
+        })) => {
             let mut config = load_or_default_config(&path);
             let resolved_scope = match scope {
                 ScopeArg::Desktop => orchestrator_core::profile::Scope::Desktop,
@@ -130,31 +145,90 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let action_args = build_action_args(action, input, interval_ms, jitter_ms, step, r#loop);
-            match profile_commands::add_profile(&mut config, ProfileAddArgs { name, scope: resolved_scope, action: action_args, debounce_ms }) {
+            let action_args =
+                match build_action_args(action, input, interval_ms, jitter_ms, step, r#loop) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                };
+            match profile_commands::add_profile(
+                &mut config,
+                ProfileAddArgs {
+                    name,
+                    scope: resolved_scope,
+                    action: action_args,
+                    debounce_ms,
+                },
+            ) {
                 Ok(()) => match config.save(&path) {
                     Ok(()) => println!("profile added."),
-                    Err(e) => { eprintln!("failed to save config: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("failed to save config: {e}");
+                        std::process::exit(1);
+                    }
                 },
-                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
         }
-        Some(Command::Profile(ProfileCommand::Edit { name, scope, action, input, interval_ms, jitter_ms, step, r#loop, debounce_ms })) => {
+        Some(Command::Profile(ProfileCommand::Edit {
+            name,
+            scope,
+            action,
+            input,
+            interval_ms,
+            jitter_ms,
+            step,
+            r#loop,
+            debounce_ms,
+        })) => {
             let mut config = load_or_default_config(&path);
             let resolved_scope = scope.map(|s| match s {
                 ScopeArg::Desktop => orchestrator_core::profile::Scope::Desktop,
                 #[cfg(target_os = "linux")]
                 ScopeArg::Window => linux_window_picker::pick_window(),
                 #[cfg(not(target_os = "linux"))]
-                ScopeArg::Window => { eprintln!("--scope window's live picker is only implemented on Linux"); std::process::exit(1); }
+                ScopeArg::Window => {
+                    eprintln!("--scope window's live picker is only implemented on Linux");
+                    std::process::exit(1);
+                }
             });
-            let action_args = action.map(|a| build_action_args(a, input, interval_ms, jitter_ms, step, r#loop));
-            match profile_commands::edit_profile(&mut config, &name, ProfileEditArgs { scope: resolved_scope, action: action_args, debounce_ms }) {
+            let action_args = match action {
+                Some(a) => {
+                    match build_action_args(a, input, interval_ms, jitter_ms, step, r#loop) {
+                        Ok(args) => Some(args),
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => None,
+            };
+            match profile_commands::edit_profile(
+                &mut config,
+                &name,
+                ProfileEditArgs {
+                    scope: resolved_scope,
+                    action: action_args,
+                    debounce_ms,
+                },
+            ) {
                 Ok(()) => match config.save(&path) {
                     Ok(()) => println!("profile updated."),
-                    Err(e) => { eprintln!("failed to save config: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("failed to save config: {e}");
+                        std::process::exit(1);
+                    }
                 },
-                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
         }
         Some(Command::Profile(ProfileCommand::Remove { name })) => {
@@ -162,9 +236,15 @@ fn main() {
             match profile_commands::remove_profile(&mut config, &name) {
                 Ok(()) => match config.save(&path) {
                     Ok(()) => println!("profile removed."),
-                    Err(e) => { eprintln!("failed to save config: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("failed to save config: {e}");
+                        std::process::exit(1);
+                    }
                 },
-                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
         }
         Some(Command::Profile(ProfileCommand::List)) => {
@@ -181,6 +261,13 @@ fn main() {
     }
 }
 
+/// Builds the notation-layer `ProfileActionArgs` from the CLI's raw flags,
+/// validating that exactly the fields belonging to the chosen `--action`
+/// were given: `--input`/`--interval-ms` are repeat-only, `--step`/`--loop`
+/// are macro-only, and mixing the two groups (e.g. `--action repeat --step
+/// ...`) is rejected via `RepeatAndMacroBothOrNeitherSpecified` rather than
+/// silently ignoring the wrong-action fields. Missing required fields for
+/// the chosen action are reported via `MissingRequiredField`.
 fn build_action_args(
     action: ActionArg,
     input: Option<String>,
@@ -188,20 +275,144 @@ fn build_action_args(
     jitter_ms: Option<u64>,
     step: Vec<String>,
     loop_: bool,
-) -> ProfileActionArgs {
+) -> Result<ProfileActionArgs, ProfileCommandError> {
+    let repeat_fields_given = input.is_some() || interval_ms.is_some();
+    let macro_fields_given = !step.is_empty() || loop_;
+
     match action {
-        ActionArg::Repeat => ProfileActionArgs::Repeat {
-            input: input.unwrap_or_else(|| { eprintln!("--input is required for --action repeat"); std::process::exit(1); }),
-            interval_ms: interval_ms.unwrap_or_else(|| { eprintln!("--interval-ms is required for --action repeat"); std::process::exit(1); }),
-            jitter_ms,
-        },
-        ActionArg::Macro => {
-            if step.is_empty() {
-                eprintln!("at least one --step is required for --action macro");
-                std::process::exit(1);
+        ActionArg::Repeat => {
+            if macro_fields_given {
+                return Err(ProfileCommandError::RepeatAndMacroBothOrNeitherSpecified);
             }
-            ProfileActionArgs::Macro { steps: step, loop_ }
+            Ok(ProfileActionArgs::Repeat {
+                input: input.ok_or(ProfileCommandError::MissingRequiredField("input"))?,
+                interval_ms: interval_ms
+                    .ok_or(ProfileCommandError::MissingRequiredField("interval-ms"))?,
+                jitter_ms,
+            })
         }
+        ActionArg::Macro => {
+            if repeat_fields_given {
+                return Err(ProfileCommandError::RepeatAndMacroBothOrNeitherSpecified);
+            }
+            if step.is_empty() {
+                return Err(ProfileCommandError::MissingRequiredField("step"));
+            }
+            Ok(ProfileActionArgs::Macro { steps: step, loop_ })
+        }
+    }
+}
+
+#[cfg(test)]
+mod build_action_args_tests {
+    use super::*;
+
+    #[test]
+    fn repeat_with_required_fields_is_ok() {
+        let result = build_action_args(
+            ActionArg::Repeat,
+            Some("key:A".to_string()),
+            Some(100),
+            None,
+            vec![],
+            false,
+        );
+        assert!(matches!(result, Ok(ProfileActionArgs::Repeat { .. })));
+    }
+
+    #[test]
+    fn repeat_missing_input_errors() {
+        let result = build_action_args(ActionArg::Repeat, None, Some(100), None, vec![], false);
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::MissingRequiredField("input")
+        );
+    }
+
+    #[test]
+    fn repeat_missing_interval_ms_errors() {
+        let result = build_action_args(
+            ActionArg::Repeat,
+            Some("key:A".to_string()),
+            None,
+            None,
+            vec![],
+            false,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::MissingRequiredField("interval-ms")
+        );
+    }
+
+    #[test]
+    fn macro_with_steps_is_ok() {
+        let result = build_action_args(
+            ActionArg::Macro,
+            None,
+            None,
+            None,
+            vec!["key:A:10".to_string()],
+            true,
+        );
+        assert!(matches!(result, Ok(ProfileActionArgs::Macro { .. })));
+    }
+
+    #[test]
+    fn macro_missing_steps_errors() {
+        let result = build_action_args(ActionArg::Macro, None, None, None, vec![], false);
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::MissingRequiredField("step")
+        );
+    }
+
+    #[test]
+    fn repeat_with_macro_step_conflicts() {
+        let result = build_action_args(
+            ActionArg::Repeat,
+            Some("key:A".to_string()),
+            Some(100),
+            None,
+            vec!["key:A:10".to_string()],
+            false,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::RepeatAndMacroBothOrNeitherSpecified
+        );
+    }
+
+    #[test]
+    fn repeat_with_loop_flag_conflicts() {
+        let result = build_action_args(
+            ActionArg::Repeat,
+            Some("key:A".to_string()),
+            Some(100),
+            None,
+            vec![],
+            true,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::RepeatAndMacroBothOrNeitherSpecified
+        );
+    }
+
+    #[test]
+    fn macro_with_repeat_fields_conflicts() {
+        let result = build_action_args(
+            ActionArg::Macro,
+            Some("key:A".to_string()),
+            None,
+            None,
+            vec!["key:A:10".to_string()],
+            false,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::RepeatAndMacroBothOrNeitherSpecified
+        );
     }
 }
 
@@ -214,11 +425,17 @@ mod linux_window_picker {
         super::runtime().block_on(async {
             let locator = match KwinWindowLocator::new().await {
                 Ok(l) => l,
-                Err(e) => { eprintln!("failed to construct window locator: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("failed to construct window locator: {e}");
+                    std::process::exit(1);
+                }
             };
             let windows = match locator.list_windows().await {
                 Ok(w) => w,
-                Err(e) => { eprintln!("failed to list windows: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("failed to list windows: {e}");
+                    std::process::exit(1);
+                }
             };
             if windows.is_empty() {
                 eprintln!("no windows are currently open to choose from");
@@ -226,7 +443,10 @@ mod linux_window_picker {
             }
             println!("choose a window:");
             for (i, w) in windows.iter().enumerate() {
-                println!("  [{i}] pid={:?} class={:?} title={:?}", w.pid, w.process_name, w.title);
+                println!(
+                    "  [{i}] pid={:?} class={:?} title={:?}",
+                    w.pid, w.process_name, w.title
+                );
             }
             print!("index: ");
             use std::io::Write;
@@ -238,11 +458,17 @@ mod linux_window_picker {
             }
             let index: usize = match line.trim().parse() {
                 Ok(i) => i,
-                Err(_) => { eprintln!("{line:?} is not a valid index"); std::process::exit(1); }
+                Err(_) => {
+                    eprintln!("{line:?} is not a valid index");
+                    std::process::exit(1);
+                }
             };
             match super::profile_commands::resolve_window_scope(&windows, index) {
                 Ok(scope) => scope,
-                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
         })
     }
@@ -272,16 +498,26 @@ mod linux_run {
                 std::process::exit(1);
             }
         };
-        println!("loaded {} profile(s) from {}", config.profiles.len(), path.display());
+        println!(
+            "loaded {} profile(s) from {}",
+            config.profiles.len(),
+            path.display()
+        );
 
         super::runtime().block_on(async move {
             let hotkey = match KdePortalHotkeyBackend::new(APP_ID).await {
                 Ok(h) => h,
-                Err(e) => { eprintln!("failed to construct hotkey backend: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("failed to construct hotkey backend: {e}");
+                    std::process::exit(1);
+                }
             };
             let window = match KwinWindowLocator::new().await {
                 Ok(w) => w,
-                Err(e) => { eprintln!("failed to construct window locator: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("failed to construct window locator: {e}");
+                    std::process::exit(1);
+                }
             };
             let mut input = YdotoolInputInjector::new();
             if let Err(e) = input.connect().await {
@@ -289,9 +525,15 @@ mod linux_run {
                 std::process::exit(1);
             }
 
-            let runner = orchestrator_core::runner::Runner::new(hotkey, input, window, config.profiles);
+            let runner =
+                orchestrator_core::runner::Runner::new(hotkey, input, window, config.profiles);
             println!("running. Ctrl-C to stop.");
-            if let Err(e) = runner.run(async { let _ = tokio::signal::ctrl_c().await; }).await {
+            if let Err(e) = runner
+                .run(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await
+            {
                 eprintln!("runner exited with an error: {e}");
                 std::process::exit(1);
             }

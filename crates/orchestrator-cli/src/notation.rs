@@ -10,7 +10,11 @@ use orchestrator_input::{InputEvent, MouseButton};
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotationError {
     UnknownStepKind(String),
-    WrongFieldCount { kind: String, expected: usize, got: usize },
+    WrongFieldCount {
+        kind: String,
+        expected: usize,
+        got: usize,
+    },
     UnrecognizedModifierOrEmptyKey(String),
     InvalidCoordinates(String),
     InvalidButton(String),
@@ -48,7 +52,9 @@ pub fn parse_combo(s: &str) -> Result<KeyCombo, NotationError> {
     if parts.iter().any(|p| p.is_empty()) {
         return Err(NotationError::UnrecognizedModifierOrEmptyKey(s.to_string()));
     }
-    let (key, modifier_parts) = parts.split_last().expect("split('+') on a non-empty string yields >=1 part");
+    let (key, modifier_parts) = parts
+        .split_last()
+        .expect("split('+') on a non-empty string yields >=1 part");
     let mut modifiers = Vec::new();
     for part in modifier_parts {
         let modifier = match part.to_ascii_lowercase().as_str() {
@@ -60,27 +66,43 @@ pub fn parse_combo(s: &str) -> Result<KeyCombo, NotationError> {
         };
         modifiers.push(modifier);
     }
-    Ok(KeyCombo { modifiers, key: key.to_string() })
+    Ok(KeyCombo {
+        modifiers,
+        key: key.to_string(),
+    })
 }
 
 fn parse_delay_ms(s: &str) -> Result<u32, NotationError> {
-    s.parse::<u32>().map_err(|_| NotationError::InvalidDelay(s.to_string()))
+    s.parse::<u32>()
+        .map_err(|_| NotationError::InvalidDelay(s.to_string()))
 }
 
 fn parse_position(s: &str) -> Result<ClickPosition, NotationError> {
     if s == "cursor" {
         return Ok(ClickPosition::AtCursor);
     }
-    let (x_str, y_str) = s.split_once(',').ok_or_else(|| NotationError::InvalidCoordinates(s.to_string()))?;
-    let x: i32 = x_str.parse().map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
-    let y: i32 = y_str.parse().map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
+    let (x_str, y_str) = s
+        .split_once(',')
+        .ok_or_else(|| NotationError::InvalidCoordinates(s.to_string()))?;
+    let x: i32 = x_str
+        .parse()
+        .map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
+    let y: i32 = y_str
+        .parse()
+        .map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
     Ok(ClickPosition::Fixed { x, y })
 }
 
 fn parse_dx_dy(s: &str) -> Result<(i32, i32), NotationError> {
-    let (dx_str, dy_str) = s.split_once(',').ok_or_else(|| NotationError::InvalidCoordinates(s.to_string()))?;
-    let dx: i32 = dx_str.parse().map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
-    let dy: i32 = dy_str.parse().map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
+    let (dx_str, dy_str) = s
+        .split_once(',')
+        .ok_or_else(|| NotationError::InvalidCoordinates(s.to_string()))?;
+    let dx: i32 = dx_str
+        .parse()
+        .map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
+    let dy: i32 = dy_str
+        .parse()
+        .map_err(|_| NotationError::InvalidCoordinates(s.to_string()))?;
     Ok((dx, dy))
 }
 
@@ -95,17 +117,30 @@ fn parse_button(s: &str) -> Result<MouseButton, NotationError> {
 
 pub fn parse_macro_step(s: &str) -> Result<MacroStep, NotationError> {
     let fields: Vec<&str> = s.split(':').collect();
-    let kind = *fields.first().ok_or_else(|| NotationError::UnknownStepKind(s.to_string()))?;
+    let kind = *fields
+        .first()
+        .ok_or_else(|| NotationError::UnknownStepKind(s.to_string()))?;
     match kind {
         "key" => {
             if fields.len() != 3 {
-                return Err(NotationError::WrongFieldCount { kind: "key".to_string(), expected: 3, got: fields.len() });
+                return Err(NotationError::WrongFieldCount {
+                    kind: "key".to_string(),
+                    expected: 3,
+                    got: fields.len(),
+                });
             }
-            Ok(MacroStep::KeyPress { combo: parse_combo(fields[1])?, delay_ms: parse_delay_ms(fields[2])? })
+            Ok(MacroStep::KeyPress {
+                combo: parse_combo(fields[1])?,
+                delay_ms: parse_delay_ms(fields[2])?,
+            })
         }
         "click" => {
             if fields.len() != 4 {
-                return Err(NotationError::WrongFieldCount { kind: "click".to_string(), expected: 4, got: fields.len() });
+                return Err(NotationError::WrongFieldCount {
+                    kind: "click".to_string(),
+                    expected: 4,
+                    got: fields.len(),
+                });
             }
             Ok(MacroStep::MouseClick {
                 delay_ms: parse_delay_ms(fields[3])?,
@@ -115,16 +150,32 @@ pub fn parse_macro_step(s: &str) -> Result<MacroStep, NotationError> {
         }
         "drag" => {
             if fields.len() != 4 {
-                return Err(NotationError::WrongFieldCount { kind: "drag".to_string(), expected: 4, got: fields.len() });
+                return Err(NotationError::WrongFieldCount {
+                    kind: "drag".to_string(),
+                    expected: 4,
+                    got: fields.len(),
+                });
             }
-            Ok(MacroStep::Drag { delay_ms: parse_delay_ms(fields[3])?, from: parse_position(fields[1])?, to: parse_position(fields[2])? })
+            Ok(MacroStep::Drag {
+                delay_ms: parse_delay_ms(fields[3])?,
+                from: parse_position(fields[1])?,
+                to: parse_position(fields[2])?,
+            })
         }
         "scroll" => {
             if fields.len() != 3 {
-                return Err(NotationError::WrongFieldCount { kind: "scroll".to_string(), expected: 3, got: fields.len() });
+                return Err(NotationError::WrongFieldCount {
+                    kind: "scroll".to_string(),
+                    expected: 3,
+                    got: fields.len(),
+                });
             }
             let (dx, dy) = parse_dx_dy(fields[1])?;
-            Ok(MacroStep::Scroll { delay_ms: parse_delay_ms(fields[2])?, dx, dy })
+            Ok(MacroStep::Scroll {
+                delay_ms: parse_delay_ms(fields[2])?,
+                dx,
+                dy,
+            })
         }
         other => Err(NotationError::UnknownStepKind(other.to_string())),
     }
@@ -132,17 +183,27 @@ pub fn parse_macro_step(s: &str) -> Result<MacroStep, NotationError> {
 
 pub fn parse_repeat_input(s: &str) -> Result<InputEvent, NotationError> {
     let fields: Vec<&str> = s.split(':').collect();
-    let kind = *fields.first().ok_or_else(|| NotationError::UnknownStepKind(s.to_string()))?;
+    let kind = *fields
+        .first()
+        .ok_or_else(|| NotationError::UnknownStepKind(s.to_string()))?;
     match kind {
         "key" => {
             if fields.len() != 2 {
-                return Err(NotationError::WrongFieldCount { kind: "key".to_string(), expected: 2, got: fields.len() });
+                return Err(NotationError::WrongFieldCount {
+                    kind: "key".to_string(),
+                    expected: 2,
+                    got: fields.len(),
+                });
             }
             Ok(InputEvent::KeyPress(parse_combo(fields[1])?))
         }
         "scroll" => {
             if fields.len() != 2 {
-                return Err(NotationError::WrongFieldCount { kind: "scroll".to_string(), expected: 2, got: fields.len() });
+                return Err(NotationError::WrongFieldCount {
+                    kind: "scroll".to_string(),
+                    expected: 2,
+                    got: fields.len(),
+                });
             }
             let (dx, dy) = parse_dx_dy(fields[1])?;
             Ok(InputEvent::Scroll { dx, dy })
@@ -162,13 +223,25 @@ mod tests {
     #[test]
     fn parse_combo_plain_key() {
         let combo = parse_combo("A").unwrap();
-        assert_eq!(combo, KeyCombo { modifiers: vec![], key: "A".to_string() });
+        assert_eq!(
+            combo,
+            KeyCombo {
+                modifiers: vec![],
+                key: "A".to_string()
+            }
+        );
     }
 
     #[test]
     fn parse_combo_single_modifier() {
         let combo = parse_combo("Ctrl+C").unwrap();
-        assert_eq!(combo, KeyCombo { modifiers: vec![Modifier::Ctrl], key: "C".to_string() });
+        assert_eq!(
+            combo,
+            KeyCombo {
+                modifiers: vec![Modifier::Ctrl],
+                key: "C".to_string()
+            }
+        );
     }
 
     #[test]
@@ -176,7 +249,10 @@ mod tests {
         let combo = parse_combo("ctrl+ALT+F5").unwrap();
         assert_eq!(
             combo,
-            KeyCombo { modifiers: vec![Modifier::Ctrl, Modifier::Alt], key: "F5".to_string() }
+            KeyCombo {
+                modifiers: vec![Modifier::Ctrl, Modifier::Alt],
+                key: "F5".to_string()
+            }
         );
     }
 
@@ -184,7 +260,11 @@ mod tests {
     fn parse_combo_meta_aliases() {
         for alias in ["Meta", "Super", "Win"] {
             let combo = parse_combo(&format!("{alias}+F9")).unwrap();
-            assert_eq!(combo.modifiers, vec![Modifier::Meta], "alias {alias} should map to Modifier::Meta");
+            assert_eq!(
+                combo.modifiers,
+                vec![Modifier::Meta],
+                "alias {alias} should map to Modifier::Meta"
+            );
         }
     }
 
@@ -206,7 +286,10 @@ mod tests {
         assert_eq!(
             step,
             MacroStep::KeyPress {
-                combo: KeyCombo { modifiers: vec![Modifier::Ctrl, Modifier::Alt], key: "F5".to_string() },
+                combo: KeyCombo {
+                    modifiers: vec![Modifier::Ctrl, Modifier::Alt],
+                    key: "F5".to_string()
+                },
                 delay_ms: 50,
             }
         );
@@ -240,13 +323,20 @@ mod tests {
         let step = parse_macro_step("click:right:cursor:10").unwrap();
         assert_eq!(
             step,
-            MacroStep::MouseClick { delay_ms: 10, button: MouseButton::Right, position: ClickPosition::AtCursor }
+            MacroStep::MouseClick {
+                delay_ms: 10,
+                button: MouseButton::Right,
+                position: ClickPosition::AtCursor
+            }
         );
     }
 
     #[test]
     fn macro_step_click_invalid_button() {
-        assert!(matches!(parse_macro_step("click:nope:cursor:10"), Err(NotationError::InvalidButton(_))));
+        assert!(matches!(
+            parse_macro_step("click:nope:cursor:10"),
+            Err(NotationError::InvalidButton(_))
+        ));
     }
 
     #[test]
@@ -264,7 +354,11 @@ mod tests {
         let step = parse_macro_step("drag:cursor:300,400:50").unwrap();
         assert_eq!(
             step,
-            MacroStep::Drag { delay_ms: 50, from: ClickPosition::AtCursor, to: ClickPosition::Fixed { x: 300, y: 400 } }
+            MacroStep::Drag {
+                delay_ms: 50,
+                from: ClickPosition::AtCursor,
+                to: ClickPosition::Fixed { x: 300, y: 400 }
+            }
         );
     }
 
@@ -273,14 +367,24 @@ mod tests {
     #[test]
     fn macro_step_scroll() {
         let step = parse_macro_step("scroll:0,-3:20").unwrap();
-        assert_eq!(step, MacroStep::Scroll { delay_ms: 20, dx: 0, dy: -3 });
+        assert_eq!(
+            step,
+            MacroStep::Scroll {
+                delay_ms: 20,
+                dx: 0,
+                dy: -3
+            }
+        );
     }
 
     // -- parse_macro_step: unknown kind -----------------------------------
 
     #[test]
     fn macro_step_unknown_kind() {
-        assert!(matches!(parse_macro_step("teleport:1,2:5"), Err(NotationError::UnknownStepKind(_))));
+        assert!(matches!(
+            parse_macro_step("teleport:1,2:5"),
+            Err(NotationError::UnknownStepKind(_))
+        ));
     }
 
     // -- parse_repeat_input: key/scroll allowed, click/drag rejected -------
@@ -288,7 +392,13 @@ mod tests {
     #[test]
     fn repeat_input_key() {
         let event = parse_repeat_input("key:W").unwrap();
-        assert_eq!(event, InputEvent::KeyPress(KeyCombo { modifiers: vec![], key: "W".to_string() }));
+        assert_eq!(
+            event,
+            InputEvent::KeyPress(KeyCombo {
+                modifiers: vec![],
+                key: "W".to_string()
+            })
+        );
     }
 
     #[test]
