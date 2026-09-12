@@ -2,6 +2,10 @@
 name = "orchestrator-cli"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Global-hotkey-triggered input automation for KDE Plasma/Wayland"
+repository = "https://github.com/barebones-sh/orchestrator"
+authors = ["barebones-sh"]
 
 [[bin]]
 name = "orchestrator"
