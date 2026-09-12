@@ -24,8 +24,21 @@ pub enum ProfileCommandError {
     Notation(String),
     NoSuchProfile(String),
     DuplicateProfileName(String),
+    // `NoWindowsAvailable`/`WindowIndexOutOfRange` are only ever constructed
+    // by `resolve_window_scope`, which itself is only ever called from
+    // `main.rs`'s Linux-only window picker (`linux_window_picker`). The
+    // logic is deliberately portable/OS-independent (see the doc comment on
+    // `resolve_window_scope`), so on a non-Linux build these variants are
+    // genuinely unused -- `allow(dead_code)` there rather than cfg-gating
+    // the variants away, so they (and their unit tests) keep compiling and
+    // meaning something on every target.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     NoWindowsAvailable,
-    WindowIndexOutOfRange { chosen: usize, available: usize },
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    WindowIndexOutOfRange {
+        chosen: usize,
+        available: usize,
+    },
     MissingRequiredField(&'static str),
     RepeatAndMacroBothOrNeitherSpecified,
 }
@@ -99,6 +112,16 @@ pub struct ProfileEditArgs {
     pub debounce_ms: Option<u32>,
 }
 
+// Only currently called from `main.rs`'s Linux-only window picker
+// (`linux_window_picker::pick_window`), even though this function's logic
+// itself is portable/OS-independent by design (Task 2 kept it free of any
+// live D-Bus dependency specifically so it stays unit-testable on any
+// platform -- see the module doc comment / design spec §5). Gating the
+// function itself behind `#[cfg(target_os = "linux")]` would misrepresent
+// that and stop these unit tests from running/meaning anything on a
+// non-Linux target, so this is `allow(dead_code)` on non-Linux instead of a
+// `cfg`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn resolve_window_scope(
     windows: &[WindowInfo],
     chosen_index: usize,
