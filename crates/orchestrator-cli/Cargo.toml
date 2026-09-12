@@ -11,6 +11,13 @@ authors = ["barebones-sh"]
 name = "orchestrator"
 path = "src/main.rs"
 
+[package.metadata.deb]
+depends = "ydotool"
+assets = [
+    ["target/release/orchestrator", "usr/bin/", "755"],
+    ["../../packaging/linux/io.github.barebonessh.Orchestrator.desktop", "usr/share/applications/", "644"],
+]
+
 [dependencies]
 clap = { workspace = true }
 tracing-subscriber = "0.3"
