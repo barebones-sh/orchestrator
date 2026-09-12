@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: build-and-test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+          - name: macos-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace --verbose
+
+      - name: Test workspace
+        run: cargo test --workspace --verbose
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  orchestrator-core-zero-deps:
+    name: orchestrator-core (zero platform deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test orchestrator-core with default (zero) features
+        run: cargo test -p orchestrator-core --verbose
+
+      - name: Assert zero platform dependencies
+        run: |
+          set -euo pipefail
+          TREE="$(cargo tree -p orchestrator-core -e normal)"
+          echo "$TREE"
+          if echo "$TREE" | grep -qE '\b(tokio|zbus|ashpd|tracing)\b'; then
+            echo "::error::orchestrator-core's default dependency tree leaked a platform dependency (tokio/zbus/ashpd/tracing) -- this crate must stay zero-platform-deps by default."
+            exit 1
+          fi
