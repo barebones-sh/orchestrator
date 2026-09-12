@@ -3,219 +3,256 @@ use clap::{Parser, Subcommand};
 mod notation;
 mod profile_commands;
 
-/// Orchestrator: global-hotkey input automation (profile commands not yet implemented).
+use profile_commands::{ProfileActionArgs, ProfileAddArgs, ProfileEditArgs};
+
+/// Orchestrator: global-hotkey input automation.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Path to the config file. Defaults to the platform config directory
+    /// (see `orchestrator_core::Config::config_path`).
+    #[arg(long, global = true)]
+    config: Option<std::path::PathBuf>,
 }
 
-/// Hidden diagnostic subcommands added for Task 9's human-in-the-loop
-/// verification pass against a live KDE/Wayland session. These are NOT
-/// user-facing product surface -- `profile add/edit/remove/list` remains
-/// future work per the first increment's non-goals (see
-/// `.superpowers/sdd/meant-for-you-to-modular-spring/task-9-brief.md`). Each
-/// variant is hidden from `--help` accordingly and only exists to let a
-/// human exercise the real Linux backends end-to-end once, by hand.
-// The shared `Internal*` prefix is deliberate, not an oversight: it signals
-// at every call site (and in `--help` source, even though these are hidden)
-// that these are Task 9 diagnostic-only variants, not real product
-// subcommands -- see the doc comment above.
-#[allow(clippy::enum_variant_names)]
 #[derive(Subcommand)]
 enum Command {
-    /// Construct the real KDE portal hotkey backend (`KdePortalHotkeyBackend`),
-    /// register one action, print the resolved key combo, then print every
-    /// press/release event received on `subscribe()` until Ctrl-C.
-    #[cfg(target_os = "linux")]
-    #[command(hide = true)]
-    InternalHotkeySmokeTest {
-        /// App id passed to `KdePortalHotkeyBackend::new`. Must match an
-        /// installed `.desktop` file's basename, or the portal rejects
-        /// registration -- see `orchestrator-hotkey`'s
-        /// `kde_portal_shortcuts` module doc comment.
-        app_id: String,
-    },
+    /// Profile management: add, edit, remove, or list profiles.
+    #[command(subcommand)]
+    Profile(ProfileCommand),
 
-    /// Construct the real KWin D-Bus window locator (`KwinWindowLocator`),
-    /// list all windows, print the currently focused window, and (if a
-    /// handle is given) call `activate_window` on it. Run once with no
-    /// handle to see the list of available handles, then run again with one
-    /// copied from that output to actually exercise activation -- see
-    /// `activate_window`'s role in the "activate target -> inject -> restore
-    /// prior focus" sequence documented in
-    /// `docs/superpowers/specs/2026-08-09-wayland-injection-spike-findings.md`.
-    #[cfg(target_os = "linux")]
-    #[command(hide = true)]
-    InternalWindowSmokeTest {
-        /// A `WindowHandle` string (e.g. copied from a prior no-argument
-        /// run's window list) to pass to `activate_window`. Omit to only
-        /// list windows and print the focused one.
-        handle: Option<String>,
-    },
+    /// Load the config and run all profiles until Ctrl-C.
+    Run,
+}
 
-    /// Construct the real ydotool input injector (`YdotoolInputInjector`),
-    /// connect to `ydotoold`, and inject one keypress (press then release)
-    /// of the given portable key name (default "A").
-    #[cfg(target_os = "linux")]
-    #[command(hide = true)]
-    InternalInputSmokeTest {
-        #[arg(default_value = "A")]
-        key: String,
+#[derive(Subcommand)]
+enum ProfileCommand {
+    /// Add a new profile.
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        scope: ScopeArg,
+        #[arg(long)]
+        action: ActionArg,
+        /// Single input for --action repeat (key:<combo> or scroll:<dx,dy>).
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long)]
+        interval_ms: Option<u64>,
+        #[arg(long)]
+        jitter_ms: Option<u64>,
+        /// Repeatable for --action macro.
+        #[arg(long)]
+        step: Vec<String>,
+        #[arg(long)]
+        r#loop: bool,
+        #[arg(long)]
+        debounce_ms: Option<u32>,
     },
+    /// Edit an existing profile. Only given flags change.
+    Edit {
+        name: String,
+        #[arg(long)]
+        scope: Option<ScopeArg>,
+        #[arg(long)]
+        action: Option<ActionArg>,
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long)]
+        interval_ms: Option<u64>,
+        #[arg(long)]
+        jitter_ms: Option<u64>,
+        #[arg(long)]
+        step: Vec<String>,
+        #[arg(long)]
+        r#loop: bool,
+        #[arg(long)]
+        debounce_ms: Option<u32>,
+    },
+    /// Remove a profile by name.
+    Remove { name: String },
+    /// List all profiles.
+    List,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum ScopeArg {
+    Desktop,
+    Window,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum ActionArg {
+    Repeat,
+    Macro,
+}
+
+// Only ever called from `linux_window_picker` (Linux-only): `tokio` is a
+// Linux-only dependency per Cargo.toml's target-specific dependency tables
+// (backend selection per design spec §4), so this must be cfg-gated too or
+// non-Linux builds (e.g. `cargo check --target x86_64-apple-darwin`) fail to
+// resolve the `tokio` crate at all.
+#[cfg(target_os = "linux")]
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("failed to build tokio runtime")
+}
+
+fn config_path(override_path: &Option<std::path::PathBuf>) -> std::path::PathBuf {
+    override_path.clone().unwrap_or_else(orchestrator_core::Config::config_path)
+}
+
+fn load_or_default_config(path: &std::path::Path) -> orchestrator_core::Config {
+    orchestrator_core::Config::load(path).unwrap_or_else(|_| orchestrator_core::Config {
+        schema_version: orchestrator_core::config::CURRENT_SCHEMA_VERSION,
+        profiles: vec![],
+    })
 }
 
 fn main() {
     let cli = Cli::parse();
+    let path = config_path(&cli.config);
 
     match cli.command {
         None => {}
+        Some(Command::Profile(ProfileCommand::Add { name, scope, action, input, interval_ms, jitter_ms, step, r#loop, debounce_ms })) => {
+            let mut config = load_or_default_config(&path);
+            let resolved_scope = match scope {
+                ScopeArg::Desktop => orchestrator_core::profile::Scope::Desktop,
+                #[cfg(target_os = "linux")]
+                ScopeArg::Window => linux_window_picker::pick_window(),
+                #[cfg(not(target_os = "linux"))]
+                ScopeArg::Window => {
+                    eprintln!("--scope window's live picker is only implemented on Linux");
+                    std::process::exit(1);
+                }
+            };
+            let action_args = build_action_args(action, input, interval_ms, jitter_ms, step, r#loop);
+            match profile_commands::add_profile(&mut config, ProfileAddArgs { name, scope: resolved_scope, action: action_args, debounce_ms }) {
+                Ok(()) => match config.save(&path) {
+                    Ok(()) => println!("profile added."),
+                    Err(e) => { eprintln!("failed to save config: {e}"); std::process::exit(1); }
+                },
+                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+            }
+        }
+        Some(Command::Profile(ProfileCommand::Edit { name, scope, action, input, interval_ms, jitter_ms, step, r#loop, debounce_ms })) => {
+            let mut config = load_or_default_config(&path);
+            let resolved_scope = scope.map(|s| match s {
+                ScopeArg::Desktop => orchestrator_core::profile::Scope::Desktop,
+                #[cfg(target_os = "linux")]
+                ScopeArg::Window => linux_window_picker::pick_window(),
+                #[cfg(not(target_os = "linux"))]
+                ScopeArg::Window => { eprintln!("--scope window's live picker is only implemented on Linux"); std::process::exit(1); }
+            });
+            let action_args = action.map(|a| build_action_args(a, input, interval_ms, jitter_ms, step, r#loop));
+            match profile_commands::edit_profile(&mut config, &name, ProfileEditArgs { scope: resolved_scope, action: action_args, debounce_ms }) {
+                Ok(()) => match config.save(&path) {
+                    Ok(()) => println!("profile updated."),
+                    Err(e) => { eprintln!("failed to save config: {e}"); std::process::exit(1); }
+                },
+                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+            }
+        }
+        Some(Command::Profile(ProfileCommand::Remove { name })) => {
+            let mut config = load_or_default_config(&path);
+            match profile_commands::remove_profile(&mut config, &name) {
+                Ok(()) => match config.save(&path) {
+                    Ok(()) => println!("profile removed."),
+                    Err(e) => { eprintln!("failed to save config: {e}"); std::process::exit(1); }
+                },
+                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+            }
+        }
+        Some(Command::Profile(ProfileCommand::List)) => {
+            let config = load_or_default_config(&path);
+            print!("{}", profile_commands::format_profile_list(&config));
+        }
         #[cfg(target_os = "linux")]
-        Some(Command::InternalHotkeySmokeTest { app_id }) => linux_smoke::hotkey_smoke_test(app_id),
-        #[cfg(target_os = "linux")]
-        Some(Command::InternalWindowSmokeTest { handle }) => linux_smoke::window_smoke_test(handle),
-        #[cfg(target_os = "linux")]
-        Some(Command::InternalInputSmokeTest { key }) => linux_smoke::input_smoke_test(key),
+        Some(Command::Run) => linux_run::run(path),
+        #[cfg(not(target_os = "linux"))]
+        Some(Command::Run) => {
+            eprintln!("`run` is only implemented on Linux in this increment (macOS backends are still stubs)");
+            std::process::exit(1);
+        }
     }
 }
 
-/// Diagnostic-only smoke tests for Task 9's human-in-the-loop verification
-/// pass. Not user-facing product surface -- see [`Command`]'s doc comment.
-/// Each function builds its own single-threaded-friendly Tokio runtime
-/// on-demand rather than wrapping all of `main` in `#[tokio::main]`, since
-/// the ordinary bare-invocation path (no subcommand) has no async work at
-/// all.
+fn build_action_args(
+    action: ActionArg,
+    input: Option<String>,
+    interval_ms: Option<u64>,
+    jitter_ms: Option<u64>,
+    step: Vec<String>,
+    loop_: bool,
+) -> ProfileActionArgs {
+    match action {
+        ActionArg::Repeat => ProfileActionArgs::Repeat {
+            input: input.unwrap_or_else(|| { eprintln!("--input is required for --action repeat"); std::process::exit(1); }),
+            interval_ms: interval_ms.unwrap_or_else(|| { eprintln!("--interval-ms is required for --action repeat"); std::process::exit(1); }),
+            jitter_ms,
+        },
+        ActionArg::Macro => {
+            if step.is_empty() {
+                eprintln!("at least one --step is required for --action macro");
+                std::process::exit(1);
+            }
+            ProfileActionArgs::Macro { steps: step, loop_ }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
-mod linux_smoke {
-    use orchestrator_hotkey::kde_portal_shortcuts::KdePortalHotkeyBackend;
-    use orchestrator_hotkey::{HotkeyBackend, KeyCombo};
-    use orchestrator_input::linux_wayland::YdotoolInputInjector;
-    use orchestrator_input::{InputEvent, InputInjector};
+mod linux_window_picker {
     use orchestrator_window::kwin_dbus::KwinWindowLocator;
-    use orchestrator_window::{WindowHandle, WindowLocator};
+    use orchestrator_window::WindowLocator;
 
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime")
-    }
-
-    pub fn hotkey_smoke_test(app_id: String) {
-        runtime().block_on(async move {
-            eprintln!(
-                "internal-hotkey-smoke-test: constructing KdePortalHotkeyBackend(app_id={app_id:?})"
-            );
-            let backend = match KdePortalHotkeyBackend::new(app_id).await {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("failed to construct backend: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            let (id, combo) = match backend
-                .register("orchestrator-smoke-test-action", None)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("register failed: {e}");
-                    std::process::exit(1);
-                }
-            };
-            println!("registered: id={id:?} resolved combo={combo:?}");
-            println!("press the assigned combo to see events below; Ctrl-C to exit.");
-
-            let rx = backend.subscribe();
-            // subscribe() hands back a blocking std::sync::mpsc::Receiver, so
-            // it's drained on a blocking-pool thread rather than the async
-            // runtime, and simply left to be torn down with the process on
-            // Ctrl-C (a bare JoinHandle::abort() on a spawn_blocking task
-            // does not interrupt an in-progress blocking recv(), but that's
-            // fine here since the whole process exits right after).
-            let _events = tokio::task::spawn_blocking(move || {
-                while let Ok((id, event)) = rx.recv() {
-                    println!("event: id={id:?} event={event:?}");
-                }
-            });
-
-            let _ = tokio::signal::ctrl_c().await;
-            println!("Ctrl-C received; unregistering and exiting.");
-            let _ = backend.unregister(id).await;
-        });
-    }
-
-    pub fn window_smoke_test(handle: Option<String>) {
-        runtime().block_on(async {
-            eprintln!("internal-window-smoke-test: constructing KwinWindowLocator");
+    pub fn pick_window() -> orchestrator_core::profile::Scope {
+        super::runtime().block_on(async {
             let locator = match KwinWindowLocator::new().await {
                 Ok(l) => l,
-                Err(e) => {
-                    eprintln!("failed to construct locator: {e}");
-                    std::process::exit(1);
-                }
+                Err(e) => { eprintln!("failed to construct window locator: {e}"); std::process::exit(1); }
             };
-
-            match locator.list_windows().await {
-                Ok(windows) => {
-                    println!("windows ({}):", windows.len());
-                    for w in &windows {
-                        println!("  {w:?}");
-                    }
-                }
-                Err(e) => eprintln!("list_windows failed: {e}"),
+            let windows = match locator.list_windows().await {
+                Ok(w) => w,
+                Err(e) => { eprintln!("failed to list windows: {e}"); std::process::exit(1); }
+            };
+            if windows.is_empty() {
+                eprintln!("no windows are currently open to choose from");
+                std::process::exit(1);
             }
-
-            match locator.focused_window().await {
-                Ok(handle) => println!("focused window: {handle:?}"),
-                Err(e) => eprintln!("focused_window failed: {e}"),
+            println!("choose a window:");
+            for (i, w) in windows.iter().enumerate() {
+                println!("  [{i}] pid={:?} class={:?} title={:?}", w.pid, w.process_name, w.title);
             }
-
-            // Only exercised when a handle is given (e.g. copied from the
-            // window list printed above on a prior run) -- see this
-            // variant's doc comment. `activate_window` is otherwise
-            // untouched by this smoke test, even though it's the single
-            // most load-bearing mechanic the whole Scope::Window feature
-            // rests on (activate target -> inject -> restore prior focus).
-            if let Some(handle) = handle {
-                println!("activating window with handle {handle:?}...");
-                match locator.activate_window(&WindowHandle(handle)).await {
-                    Ok(()) => println!("activate_window: ok"),
-                    Err(e) => eprintln!("activate_window failed: {e}"),
-                }
-            } else {
-                println!(
-                    "no handle given; skipping activate_window. Re-run with a handle copied \
-                     from the window list above to exercise it."
-                );
+            print!("index: ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() {
+                eprintln!("failed to read a selection from stdin");
+                std::process::exit(1);
             }
-        });
+            let index: usize = match line.trim().parse() {
+                Ok(i) => i,
+                Err(_) => { eprintln!("{line:?} is not a valid index"); std::process::exit(1); }
+            };
+            match super::profile_commands::resolve_window_scope(&windows, index) {
+                Ok(scope) => scope,
+                Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+            }
+        })
     }
+}
 
-    pub fn input_smoke_test(key: String) {
-        runtime().block_on(async move {
-            eprintln!("internal-input-smoke-test: constructing YdotoolInputInjector (key={key:?})");
-            let mut injector = YdotoolInputInjector::new();
-            if let Err(e) = injector.connect().await {
-                eprintln!("connect failed: {e}");
-                std::process::exit(1);
-            }
-
-            let combo = KeyCombo {
-                modifiers: Vec::new(),
-                key: key.clone(),
-            };
-            if let Err(e) = injector.inject(&InputEvent::KeyPress(combo.clone())).await {
-                eprintln!("inject KeyPress failed: {e}");
-                std::process::exit(1);
-            }
-            if let Err(e) = injector.inject(&InputEvent::KeyRelease(combo)).await {
-                eprintln!("inject KeyRelease failed: {e}");
-                std::process::exit(1);
-            }
-            println!("injected key press+release for {key:?}");
-        });
+/// Placeholder for Task 4, which replaces this with the real "load config,
+/// spin up backends, and run all profiles until Ctrl-C" implementation.
+#[cfg(target_os = "linux")]
+mod linux_run {
+    pub fn run(_path: std::path::PathBuf) {
+        unimplemented!("Task 4")
     }
 }
