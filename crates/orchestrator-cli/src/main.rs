@@ -110,11 +110,113 @@ fn config_path(override_path: &Option<std::path::PathBuf>) -> std::path::PathBuf
         .unwrap_or_else(orchestrator_core::Config::config_path)
 }
 
+/// Distinguishes the one `Config::load` failure that's expected/recoverable
+/// on a first run (no config file has ever been written yet) from every
+/// other failure (parse error, validation failure, unsupported schema
+/// version, or any other IO error). Only the former should be silently
+/// papered over with an empty default config -- silently defaulting on any
+/// other failure would mean the next `save` overwrites a real, possibly
+/// salvageable file on disk with an empty one (see final-review Fix 1).
+fn is_first_run_missing_file(err: &orchestrator_core::ConfigError) -> bool {
+    matches!(
+        err,
+        orchestrator_core::ConfigError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 fn load_or_default_config(path: &std::path::Path) -> orchestrator_core::Config {
-    orchestrator_core::Config::load(path).unwrap_or_else(|_| orchestrator_core::Config {
-        schema_version: orchestrator_core::config::CURRENT_SCHEMA_VERSION,
-        profiles: vec![],
-    })
+    match orchestrator_core::Config::load(path) {
+        Ok(config) => config,
+        Err(e) if is_first_run_missing_file(&e) => orchestrator_core::Config {
+            schema_version: orchestrator_core::config::CURRENT_SCHEMA_VERSION,
+            profiles: vec![],
+        },
+        Err(e) => {
+            eprintln!("failed to load config at {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod load_or_default_config_tests {
+    use super::*;
+
+    #[test]
+    fn first_run_missing_file_is_recognized() {
+        let path = std::path::Path::new("/definitely/does/not/exist/config.json");
+        let err = orchestrator_core::Config::load(path).unwrap_err();
+        assert!(
+            is_first_run_missing_file(&err),
+            "a missing config file must be treated as a first run, not a hard error"
+        );
+    }
+
+    #[test]
+    fn unparseable_file_is_not_first_run_missing_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "orchestrator-cli-test-unparseable-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(&path, "not json").unwrap();
+        let err = orchestrator_core::Config::load(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            !is_first_run_missing_file(&err),
+            "a parse failure on an existing file must NOT be treated like a first run -- \
+             defaulting to an empty config here would silently destroy the broken-but- \
+             salvageable file on the next save"
+        );
+    }
+
+    #[test]
+    fn invalid_config_on_disk_is_not_first_run_missing_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "orchestrator-cli-test-invalid-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        // Written via `Config::save` (which does NOT validate -- only
+        // `load` does) so this test doesn't depend on guessing the exact
+        // on-disk JSON shape. schema_version is current and the file
+        // parses fine, but interval_ms: 0 fails `Config::validate`, which
+        // `Config::load` runs -- this must surface as a hard error, not be
+        // treated as "no file yet".
+        let invalid = orchestrator_core::Config {
+            schema_version: orchestrator_core::config::CURRENT_SCHEMA_VERSION,
+            profiles: vec![orchestrator_core::profile::Profile {
+                name: "bad".to_string(),
+                trigger: orchestrator_hotkey::KeyCombo {
+                    modifiers: vec![],
+                    key: String::new(),
+                },
+                action: orchestrator_core::action::Action::Repeat {
+                    input: orchestrator_input::InputEvent::KeyPress(
+                        orchestrator_hotkey::KeyCombo {
+                            modifiers: vec![],
+                            key: "A".to_string(),
+                        },
+                    ),
+                    interval_ms: 0,
+                    jitter: orchestrator_core::action::Jitter::None,
+                },
+                scope: orchestrator_core::profile::Scope::Desktop,
+                focus_steal: false,
+                debounce_ms: 400,
+            }],
+        };
+        invalid.save(&path).unwrap();
+
+        let result = orchestrator_core::Config::load(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.expect_err("interval_ms: 0 must fail Config::load's validate() step");
+        assert!(!is_first_run_missing_file(&err));
+    }
 }
 
 fn main() {
@@ -162,13 +264,24 @@ fn main() {
                     debounce_ms,
                 },
             ) {
-                Ok(()) => match config.save(&path) {
-                    Ok(()) => println!("profile added."),
-                    Err(e) => {
-                        eprintln!("failed to save config: {e}");
+                Ok(()) => {
+                    // `add_profile` builds an `Action`/`Scope` without
+                    // checking e.g. interval_ms > 0 or jitter <= interval --
+                    // that's `Config::validate`'s job, and it must run
+                    // BEFORE save so an invalid profile is never written to
+                    // disk (see final-review Fix 1).
+                    if let Err(e) = config.validate() {
+                        eprintln!("{e}");
                         std::process::exit(1);
                     }
-                },
+                    match config.save(&path) {
+                        Ok(()) => println!("profile added."),
+                        Err(e) => {
+                            eprintln!("failed to save config: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("{e}");
                     std::process::exit(1);
@@ -218,13 +331,19 @@ fn main() {
                     debounce_ms,
                 },
             ) {
-                Ok(()) => match config.save(&path) {
-                    Ok(()) => println!("profile updated."),
-                    Err(e) => {
-                        eprintln!("failed to save config: {e}");
+                Ok(()) => {
+                    if let Err(e) = config.validate() {
+                        eprintln!("{e}");
                         std::process::exit(1);
                     }
-                },
+                    match config.save(&path) {
+                        Ok(()) => println!("profile updated."),
+                        Err(e) => {
+                            eprintln!("failed to save config: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("{e}");
                     std::process::exit(1);
@@ -234,13 +353,23 @@ fn main() {
         Some(Command::Profile(ProfileCommand::Remove { name })) => {
             let mut config = load_or_default_config(&path);
             match profile_commands::remove_profile(&mut config, &name) {
-                Ok(()) => match config.save(&path) {
-                    Ok(()) => println!("profile removed."),
-                    Err(e) => {
-                        eprintln!("failed to save config: {e}");
+                Ok(()) => {
+                    // Removing a profile can't itself introduce a new
+                    // validation failure, but validating before save here
+                    // too is cheap defense-in-depth and keeps all three
+                    // mutating handlers consistent.
+                    if let Err(e) = config.validate() {
+                        eprintln!("{e}");
                         std::process::exit(1);
                     }
-                },
+                    match config.save(&path) {
+                        Ok(()) => println!("profile removed."),
+                        Err(e) => {
+                            eprintln!("failed to save config: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("{e}");
                     std::process::exit(1);

@@ -442,6 +442,105 @@ mod tests {
         assert!(matches!(err, ProfileCommandError::Notation(_)));
     }
 
+    // -- final-review Fix 1(a): add_profile/edit_profile don't validate ----
+    // ------------------------------------------------------------------------
+    // `add_profile`/`edit_profile` are deliberately pure and don't duplicate
+    // `Config::validate`'s checks (see design spec §5 and this module's doc
+    // comment) -- that's the `main.rs` glue layer's job, calling
+    // `Config::validate()` after a successful `add_profile`/`edit_profile`
+    // and before `config.save`. These tests demonstrate why that glue-layer
+    // call is load-bearing: without it, invalid data sails straight through.
+
+    #[test]
+    fn add_profile_alone_does_not_reject_zero_interval() {
+        let mut config = empty_config();
+        let args = ProfileAddArgs {
+            name: "zero-interval".to_string(),
+            scope: Scope::Desktop,
+            action: ProfileActionArgs::Repeat {
+                input: "key:A".to_string(),
+                interval_ms: 0,
+                jitter_ms: None,
+            },
+            debounce_ms: None,
+        };
+        // add_profile succeeds even though interval_ms: 0 is invalid --
+        // catching this is Config::validate's job, which a caller MUST run
+        // afterward (see main.rs's Add/Edit handlers).
+        assert!(add_profile(&mut config, args).is_ok());
+        assert_eq!(config.profiles[0].debounce_ms, 400);
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            orchestrator_core::error::ConfigError::InvalidInterval { .. }
+        ));
+    }
+
+    #[test]
+    fn add_profile_alone_does_not_reject_jitter_exceeding_interval() {
+        let mut config = empty_config();
+        let args = ProfileAddArgs {
+            name: "bad-jitter".to_string(),
+            scope: Scope::Desktop,
+            action: ProfileActionArgs::Repeat {
+                input: "key:A".to_string(),
+                interval_ms: 100,
+                jitter_ms: Some(999),
+            },
+            debounce_ms: None,
+        };
+        assert!(add_profile(&mut config, args).is_ok());
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            orchestrator_core::error::ConfigError::JitterRangeExceedsInterval { .. }
+        ));
+    }
+
+    #[test]
+    fn edit_profile_alone_does_not_reject_zero_interval() {
+        let mut config = empty_config();
+        add_profile(
+            &mut config,
+            ProfileAddArgs {
+                name: "target".to_string(),
+                scope: Scope::Desktop,
+                action: ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 100,
+                    jitter_ms: None,
+                },
+                debounce_ms: None,
+            },
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+
+        let result = edit_profile(
+            &mut config,
+            "target",
+            ProfileEditArgs {
+                scope: None,
+                action: Some(ProfileActionArgs::Repeat {
+                    input: "key:A".to_string(),
+                    interval_ms: 0,
+                    jitter_ms: None,
+                }),
+                debounce_ms: None,
+            },
+        );
+        // edit_profile itself accepts this -- Config::validate is what must
+        // catch it, and a caller (main.rs) must call it before saving.
+        assert!(result.is_ok());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            orchestrator_core::error::ConfigError::InvalidInterval { .. }
+        ));
+    }
+
     // -- edit_profile ---------------------------------------------------------
 
     #[test]
