@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+tracing-subscriber = "0.3"
 
 # Backend selection (design spec §4 "Dependency Philosophy" /
 # "orchestrator-cli and orchestrator-gui select backends via"): each OS build
@@ -19,7 +20,7 @@ clap = { workspace = true }
 # types (`KdePortalHotkeyBackend`, `KwinWindowLocator`, `YdotoolInputInjector`)
 # themselves.
 [target.'cfg(target_os = "linux")'.dependencies]
-orchestrator-core = { path = "../orchestrator-core", features = ["kde", "wayland"] }
+orchestrator-core = { path = "../orchestrator-core", features = ["kde", "wayland", "runner"] }
 orchestrator-hotkey = { path = "../orchestrator-hotkey", features = ["kde"] }
 orchestrator-window = { path = "../orchestrator-window", features = ["kde"] }
 orchestrator-input = { path = "../orchestrator-input", features = ["wayland"] }

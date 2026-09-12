@@ -248,11 +248,53 @@ mod linux_window_picker {
     }
 }
 
-/// Placeholder for Task 4, which replaces this with the real "load config,
-/// spin up backends, and run all profiles until Ctrl-C" implementation.
+/// Loads the config, spins up the real KDE/Wayland backends, and runs all
+/// profiles until Ctrl-C (design spec §3.6).
 #[cfg(target_os = "linux")]
 mod linux_run {
-    pub fn run(_path: std::path::PathBuf) {
-        unimplemented!("Task 4")
+    use orchestrator_hotkey::kde_portal_shortcuts::KdePortalHotkeyBackend;
+    use orchestrator_input::linux_wayland::YdotoolInputInjector;
+    use orchestrator_input::InputInjector;
+    use orchestrator_window::kwin_dbus::KwinWindowLocator;
+
+    /// Must match an installed `.desktop` file's id (see the module doc
+    /// comment on `orchestrator_hotkey::kde_portal_shortcuts` and
+    /// `packaging/linux/README.md`) or the portal rejects registration.
+    const APP_ID: &str = "io.github.barebones-sh.Orchestrator";
+
+    pub fn run(path: std::path::PathBuf) {
+        tracing_subscriber::fmt::init();
+
+        let config = match orchestrator_core::Config::load(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("failed to load config at {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        };
+        println!("loaded {} profile(s) from {}", config.profiles.len(), path.display());
+
+        super::runtime().block_on(async move {
+            let hotkey = match KdePortalHotkeyBackend::new(APP_ID).await {
+                Ok(h) => h,
+                Err(e) => { eprintln!("failed to construct hotkey backend: {e}"); std::process::exit(1); }
+            };
+            let window = match KwinWindowLocator::new().await {
+                Ok(w) => w,
+                Err(e) => { eprintln!("failed to construct window locator: {e}"); std::process::exit(1); }
+            };
+            let mut input = YdotoolInputInjector::new();
+            if let Err(e) = input.connect().await {
+                eprintln!("failed to connect input injector: {e}");
+                std::process::exit(1);
+            }
+
+            let runner = orchestrator_core::runner::Runner::new(hotkey, input, window, config.profiles);
+            println!("running. Ctrl-C to stop.");
+            if let Err(e) = runner.run(async { let _ = tokio::signal::ctrl_c().await; }).await {
+                eprintln!("runner exited with an error: {e}");
+                std::process::exit(1);
+            }
+        });
     }
 }
