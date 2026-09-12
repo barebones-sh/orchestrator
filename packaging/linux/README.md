@@ -14,5 +14,25 @@ cp packaging/linux/io.github.barebonessh.Orchestrator.desktop ~/.local/share/app
 kbuildsycoca6   # or: update-desktop-database ~/.local/share/applications
 ```
 
+**Also required, found the hard way during live verification:** the portal's
+app-info lookup does not just check that the `.desktop` file exists — it
+also requires the file's `Exec=` command to resolve to a real executable on
+`$PATH`. `Exec=orchestrator` will not be found (and the whole `.desktop`
+file will be silently treated as nonexistent, with the same "App info not
+found" error a missing file produces) unless an `orchestrator` binary is
+actually on `$PATH`. For a local dev build, symlink the built binary in:
+
+```
+ln -sf "$(pwd)/target/debug/orchestrator" ~/.local/bin/orchestrator   # assumes ~/.local/bin is on $PATH
+```
+
+A real `.deb` install would put the binary in `/usr/bin/` directly, so this
+step is dev-only — but without it, `run` and `profile add --scope window`
+fail with a confusing "App info not found" error that looks identical to a
+missing/uninstalled `.desktop` file, even when the file is correctly
+installed. (Two independent, real gaps were found here: the hyphen in an
+earlier app-id draft, since fixed, and this `$PATH` requirement — either
+one alone is enough to produce the exact same error message.)
+
 Real `.deb` packaging (installing this file system-wide as part of a
 package) is a separate, future increment.
