@@ -299,6 +299,29 @@ fn main() {
             r#loop,
             debounce_ms,
         })) => {
+            // Action-detail flags only mean anything alongside `--action`:
+            // without it, `edit` has no action variant to build them into,
+            // so silently doing nothing with them (design spec §3.3: "any
+            // flag given overwrites that field") would be a silent no-op
+            // rather than a clear error. Checked first, before touching the
+            // config or triggering any live window picker.
+            if edit_needs_action_flag(
+                action.is_some(),
+                &input,
+                &interval_ms,
+                &jitter_ms,
+                &step,
+                r#loop,
+            ) {
+                eprintln!(
+                    "--action is required whenever --input/--interval-ms/--jitter-ms/--step/\
+                     --loop are given to `profile edit` -- these flags only apply together \
+                     with --action (repeat's --input/--interval-ms/--jitter-ms, or macro's \
+                     --step/--loop)"
+                );
+                std::process::exit(1);
+            }
+
             let mut config = load_or_default_config(&path);
             let resolved_scope = scope.map(|s| match s {
                 ScopeArg::Desktop => orchestrator_core::profile::Scope::Desktop,
@@ -392,11 +415,12 @@ fn main() {
 
 /// Builds the notation-layer `ProfileActionArgs` from the CLI's raw flags,
 /// validating that exactly the fields belonging to the chosen `--action`
-/// were given: `--input`/`--interval-ms` are repeat-only, `--step`/`--loop`
-/// are macro-only, and mixing the two groups (e.g. `--action repeat --step
-/// ...`) is rejected via `RepeatAndMacroBothOrNeitherSpecified` rather than
-/// silently ignoring the wrong-action fields. Missing required fields for
-/// the chosen action are reported via `MissingRequiredField`.
+/// were given: `--input`/`--interval-ms`/`--jitter-ms` are repeat-only,
+/// `--step`/`--loop` are macro-only, and mixing the two groups (e.g.
+/// `--action repeat --step ...` or `--action macro --jitter-ms ...`) is
+/// rejected via `RepeatAndMacroBothOrNeitherSpecified` rather than silently
+/// ignoring the wrong-action fields. Missing required fields for the chosen
+/// action are reported via `MissingRequiredField`.
 fn build_action_args(
     action: ActionArg,
     input: Option<String>,
@@ -405,7 +429,7 @@ fn build_action_args(
     step: Vec<String>,
     loop_: bool,
 ) -> Result<ProfileActionArgs, ProfileCommandError> {
-    let repeat_fields_given = input.is_some() || interval_ms.is_some();
+    let repeat_fields_given = input.is_some() || interval_ms.is_some() || jitter_ms.is_some();
     let macro_fields_given = !step.is_empty() || loop_;
 
     match action {
@@ -429,6 +453,117 @@ fn build_action_args(
             }
             Ok(ProfileActionArgs::Macro { steps: step, loop_ })
         }
+    }
+}
+
+/// `profile edit`'s action-detail flags (`--input`/`--interval-ms`/
+/// `--jitter-ms`/`--step`/`--loop`) only apply together with `--action`
+/// (design spec §3.3: "any flag given overwrites that field" -- but there's
+/// no field to overwrite for these without knowing which action variant is
+/// meant). Returns whether the edit should be rejected for giving one of
+/// these flags without `--action`.
+fn edit_needs_action_flag(
+    action_given: bool,
+    input: &Option<String>,
+    interval_ms: &Option<u64>,
+    jitter_ms: &Option<u64>,
+    step: &[String],
+    loop_: bool,
+) -> bool {
+    !action_given
+        && (input.is_some()
+            || interval_ms.is_some()
+            || jitter_ms.is_some()
+            || !step.is_empty()
+            || loop_)
+}
+
+#[cfg(test)]
+mod edit_needs_action_flag_tests {
+    use super::*;
+
+    #[test]
+    fn no_action_and_no_detail_flags_is_fine() {
+        assert!(!edit_needs_action_flag(
+            false,
+            &None,
+            &None,
+            &None,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn action_given_is_always_fine_regardless_of_detail_flags() {
+        assert!(!edit_needs_action_flag(
+            true,
+            &Some("key:A".to_string()),
+            &Some(100),
+            &Some(10),
+            &["key:A:10".to_string()],
+            true
+        ));
+    }
+
+    #[test]
+    fn interval_ms_without_action_is_rejected() {
+        assert!(edit_needs_action_flag(
+            false,
+            &None,
+            &Some(999),
+            &None,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn input_without_action_is_rejected() {
+        assert!(edit_needs_action_flag(
+            false,
+            &Some("key:A".to_string()),
+            &None,
+            &None,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn jitter_ms_without_action_is_rejected() {
+        assert!(edit_needs_action_flag(
+            false,
+            &None,
+            &None,
+            &Some(10),
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn step_without_action_is_rejected() {
+        assert!(edit_needs_action_flag(
+            false,
+            &None,
+            &None,
+            &None,
+            &["key:A:10".to_string()],
+            false
+        ));
+    }
+
+    #[test]
+    fn loop_without_action_is_rejected() {
+        assert!(edit_needs_action_flag(
+            false,
+            &None,
+            &None,
+            &None,
+            &[],
+            true
+        ));
     }
 }
 
@@ -535,6 +670,26 @@ mod build_action_args_tests {
             Some("key:A".to_string()),
             None,
             None,
+            vec!["key:A:10".to_string()],
+            false,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            ProfileCommandError::RepeatAndMacroBothOrNeitherSpecified
+        );
+    }
+
+    #[test]
+    fn macro_with_jitter_ms_conflicts() {
+        // final-review Fix 2: --jitter-ms was missing from the repeat-only
+        // field check, so `--action macro --step ... --jitter-ms 10` was
+        // silently accepted (jitter_ms just got dropped) instead of being
+        // rejected the same way `--input`/`--interval-ms` already are.
+        let result = build_action_args(
+            ActionArg::Macro,
+            None,
+            None,
+            Some(10),
             vec!["key:A:10".to_string()],
             false,
         );
