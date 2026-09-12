@@ -84,15 +84,15 @@ Prints one line per profile: `name`, scope summary (`Desktop` or `Window(<proces
 
 1. Load and validate config (`Config::load`, already atomic/validated).
 2. Install a `tracing_subscriber` (e.g. `tracing_subscriber::fmt::init()`) so the runner's existing `tracing::warn!` calls (added in the runner increment's final review) actually surface to the terminal — this is the first real binary that needs a subscriber; nothing installs one today.
-3. Construct real backends per `#[cfg(target_os = "linux")]`/`#[cfg(target_os = "macos")]`, using the fixed app-id `io.github.barebones-sh.Orchestrator` for `KdePortalHotkeyBackend::new(app_id)`.
+3. Construct real backends per `#[cfg(target_os = "linux")]`/`#[cfg(target_os = "macos")]`, using the fixed app-id `io.github.barebonessh.Orchestrator` for `KdePortalHotkeyBackend::new(app_id)`.
 4. Build `Runner::new(hotkey, input, window, config.profiles)`, call `.run(ctrl_c_future)` where `ctrl_c_future` wraps `tokio::signal::ctrl_c()`.
 5. Print a short startup summary (profile count, config path used) before blocking; print nothing further unless a profile's own `tracing::warn!` fires or `run()` returns an error, which is printed and the process exits non-zero.
 
 ### 3.7 App-id / `.desktop` file
 
-App-id: `io.github.barebones-sh.Orchestrator` (fixed, hardcoded in `run`'s backend construction — not a CLI flag; a single app has one identity).
+App-id: `io.github.barebonessh.Orchestrator` (fixed, hardcoded in `run`'s backend construction — not a CLI flag; a single app has one identity).
 
-Ship `packaging/linux/io.github.barebones-sh.Orchestrator.desktop` in the repo (minimal: `Type=Application`, `Name=Orchestrator`, `Exec=orchestrator`, `NoDisplay=true` — mirroring the throwaway ones used during the spike, but a real, committed, permanent file this time). Document (in the crate's README or a short `packaging/linux/README.md`) the one-time dev-install step: copy to `~/.local/share/applications/` and run `kbuildsycoca6` (or `update-desktop-database`) — matching exactly what the spike found necessary. Real `.deb` packaging (installing this file system-wide as part of a package) remains out of scope, per the original project brief's non-goals for this stage.
+Ship `packaging/linux/io.github.barebonessh.Orchestrator.desktop` in the repo (minimal: `Type=Application`, `Name=Orchestrator`, `Exec=orchestrator`, `NoDisplay=true` — mirroring the throwaway ones used during the spike, but a real, committed, permanent file this time). Document (in the crate's README or a short `packaging/linux/README.md`) the one-time dev-install step: copy to `~/.local/share/applications/` and run `kbuildsycoca6` (or `update-desktop-database`) — matching exactly what the spike found necessary. Real `.deb` packaging (installing this file system-wide as part of a package) remains out of scope, per the original project brief's non-goals for this stage.
 
 ## 4. Removing the Task 9 Diagnostics
 

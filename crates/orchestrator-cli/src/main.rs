@@ -770,7 +770,7 @@ mod linux_run {
     /// Must match an installed `.desktop` file's id (see the module doc
     /// comment on `orchestrator_hotkey::kde_portal_shortcuts` and
     /// `packaging/linux/README.md`) or the portal rejects registration.
-    const APP_ID: &str = "io.github.barebones-sh.Orchestrator";
+    const APP_ID: &str = "io.github.barebonessh.Orchestrator";
 
     pub fn run(path: std::path::PathBuf) {
         tracing_subscriber::fmt::init();

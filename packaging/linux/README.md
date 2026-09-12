@@ -10,7 +10,7 @@ installed `.desktop` file (see
 
 ```
 mkdir -p ~/.local/share/applications
-cp packaging/linux/io.github.barebones-sh.Orchestrator.desktop ~/.local/share/applications/
+cp packaging/linux/io.github.barebonessh.Orchestrator.desktop ~/.local/share/applications/
 kbuildsycoca6   # or: update-desktop-database ~/.local/share/applications
 ```
 
