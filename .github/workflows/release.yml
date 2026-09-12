@@ -9,19 +9,28 @@ permissions:
   contents: write
 
 jobs:
-  create-release:
-    name: create-release
+  check-version:
+    name: check-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" --generate-notes
+
+      - name: Verify tag matches orchestrator-cli's Cargo.toml version
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; data=json.load(sys.stdin); pkg=next(p for p in data['packages'] if p['name']=='orchestrator-cli'); print(pkg['version'])")"
+          echo "tag version:   $TAG_VERSION"
+          echo "crate version: $CRATE_VERSION"
+          if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
+            echo "::error::Pushed tag v$TAG_VERSION does not match orchestrator-cli's Cargo.toml version ($CRATE_VERSION). Update Cargo.toml or fix the tag before releasing."
+            exit 1
+          fi
 
   package:
     name: package (${{ matrix.name }})
-    needs: create-release
+    needs: check-version
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +62,26 @@ jobs:
       - name: Build .deb package
         run: cargo deb -p orchestrator-cli --target ${{ matrix.target }} --no-build
 
-      - name: Upload to release
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.name }}
+          path: target/${{ matrix.target }}/debian/*.deb
+
+  publish:
+    name: publish
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "deb-*"
+          merge-multiple: true
+
+      - name: Create release and upload packages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" target/${{ matrix.target }}/debian/*.deb
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "${{ github.ref_name }}" --generate-notes dist/*.deb

@@ -20,11 +20,27 @@ The binary lands at `target/release/orchestrator`. The project pins Rust
 toolchain is installed and selected automatically when you build from the
 repo root.
 
+## Install via `.deb`
+
+Download the `.deb` matching your architecture (`amd64` or `arm64`) from a
+[GitHub Release](https://github.com/barebones-sh/orchestrator/releases),
+then:
+
+```
+sudo apt install ./orchestrator-cli_<version>_<arch>.deb
+```
+
+This installs the `orchestrator` binary to `/usr/bin/` and its `.desktop`
+file to `/usr/share/applications/`, and pulls in `ydotool` as a dependency.
+You still need to complete step 1 of "Linux one-time setup" below (the
+`input` group / `ydotoold` step) — that part isn't done by the package.
+
 ## Linux one-time setup
 
-These steps are required for a from-source build. (Installing via a `.deb`
-package removes the second step, since the `.desktop` file ships in the
-package — see below.)
+Step 1 below is required either way (from-source build or `.deb` install) —
+`ydotool` being installed doesn't put the current user in the `input` group
+or start its daemon. Step 2 is only needed for a from-source build; a `.deb`
+install already places the `.desktop` file where the portal expects it.
 
 1. **Add yourself to the `input` group and enable `ydotoold`.** Input
    injection happens through `ydotool`, which needs access to `/dev/uinput`

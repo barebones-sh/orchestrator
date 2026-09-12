@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [package.metadata.deb]
 depends = "ydotool"
+license-file = ["../../packaging/linux/deb-license.txt", "0"]
 assets = [
     ["target/release/orchestrator", "usr/bin/", "755"],
     ["../../packaging/linux/io.github.barebonessh.Orchestrator.desktop", "usr/share/applications/", "644"],

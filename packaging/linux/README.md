@@ -1,12 +1,17 @@
 # Linux packaging notes
 
+This file documents the manual, from-source install path. A packaged `.deb`
+(see the repo root README's "Install via `.deb`" section) handles both of
+these steps for you — this file is only relevant if you're building from
+source.
+
 ## Dev install (required for `orchestrator run` / `profile add --scope window`'s
 ## hotkey registration to work at all)
 
 The KDE `GlobalShortcuts` portal requires the calling app's id to match an
 installed `.desktop` file (see
 `docs/superpowers/specs/2026-08-09-wayland-injection-spike-findings.md`
-§1b). Until this is packaged into a real `.deb`, install it manually once:
+§1b). For a from-source build, install it manually once:
 
 ```
 mkdir -p ~/.local/share/applications
@@ -34,5 +39,4 @@ installed. (Two independent, real gaps were found here: the hyphen in an
 earlier app-id draft, since fixed, and this `$PATH` requirement — either
 one alone is enough to produce the exact same error message.)
 
-Real `.deb` packaging (installing this file system-wide as part of a
-package) is a separate, future increment.
+See the repo root README for `.deb` install instructions.
