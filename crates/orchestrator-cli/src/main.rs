@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+mod notation;
+
 /// Orchestrator: global-hotkey input automation (profile commands not yet implemented).
 #[derive(Parser)]
 #[command(version, about)]
