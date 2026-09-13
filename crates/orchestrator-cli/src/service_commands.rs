@@ -5,6 +5,10 @@
 //! config-mutation logic from `main.rs`'s I/O -- this half is unit-tested,
 //! the glue half is live-verified only (see design spec's established
 //! pattern for backend-touching code, e.g. `linux_run`).
+//!
+//! All public items in this module are consumed by Task 2 (service command wiring).
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -80,9 +84,7 @@ mod tests {
         // Source builds point ExecStart at whatever `std::env::current_exe()`
         // resolves to -- e.g. a target/debug/ path, not just /usr/bin/.
         let unit = render_unit("/home/dev/src/orchestrator/target/debug/orchestrator");
-        assert!(unit.contains(
-            "ExecStart=/home/dev/src/orchestrator/target/debug/orchestrator run"
-        ));
+        assert!(unit.contains("ExecStart=/home/dev/src/orchestrator/target/debug/orchestrator run"));
     }
 
     #[test]

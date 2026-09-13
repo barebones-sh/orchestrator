@@ -622,6 +622,7 @@ name = "orchestrator-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dirs",
  "orchestrator-core",
  "orchestrator-hotkey",
  "orchestrator-input",
