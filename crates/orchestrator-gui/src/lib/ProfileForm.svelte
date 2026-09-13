@@ -62,6 +62,20 @@
     }
   }
 
+  // Editing an existing Window-scope profile seeds `scopeKind` straight to
+  // "Window" above (not via `chooseScopeKind`), so the picker would
+  // otherwise sit empty until the user manually hit "Refresh windows" even
+  // though a window is already selected. Run the same load unconditionally
+  // once at mount for that path -- this component is remounted per edit
+  // target (see the `{#key}` in +page.svelte), so this only ever runs once
+  // per profile being edited. Read through `untrack` (matching the
+  // `initial` read above) since this is deliberately a one-shot check, not
+  // a reactive dependency on later changes to `scopeKind` -- those are
+  // already handled by `chooseScopeKind`.
+  if (untrack(() => scopeKind) === "Window") {
+    loadWindows();
+  }
+
   /** @param {any} w */
   function selectWindow(w) {
     windowChoice = {
