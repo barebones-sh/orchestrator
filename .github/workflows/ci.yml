@@ -30,7 +30,12 @@ jobs:
       # Ubuntu runners do not ship those, so the workspace build fails without
       # this step. Same package list the GUI plan's Global Constraints name for
       # a local dev machine (minus build-essential/curl/wget/file, which the
-      # runner images already provide). macOS needs nothing extra.
+      # runner images already provide), minus libayatana-appindicator3-dev
+      # (removed as unnecessary: `cargo tree -p orchestrator-gui -e normal`
+      # shows no tray-icon/libappindicator* crate in the dependency graph --
+      # there is no system tray in this increment. Add it back if a future
+      # tray-icon increment's CI run actually needs it). macOS needs nothing
+      # extra.
       - name: Install Tauri Linux build prerequisites
         if: runner.os == 'Linux'
         run: |
@@ -39,7 +44,6 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
             librsvg2-dev
 
       - name: Install Rust toolchain
@@ -75,6 +79,31 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+  frontend:
+    name: frontend (orchestrator-gui)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/orchestrator-gui
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: crates/orchestrator-gui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check (svelte-check)
+        run: npm run check
+
+      - name: Build
+        run: npm run build
 
   orchestrator-core-zero-deps:
     name: orchestrator-core (zero platform deps)

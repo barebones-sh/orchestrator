@@ -502,16 +502,16 @@
                   <input type="number" bind:value={step.dy} required />
                 </label>
               {/if}
+              <label>
+                Delay (ms)
+                <input
+                  type="number"
+                  min="0"
+                  bind:value={step.delayMs}
+                  required
+                />
+              </label>
             {/if}
-            <label>
-              Delay (ms)
-              <input
-                type="number"
-                min="0"
-                bind:value={step.delayMs}
-                required
-              />
-            </label>
             <button type="button" onclick={() => removeMacroStep(step.id)}
               >Remove step</button
             >
