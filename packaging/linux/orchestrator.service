@@ -1,11 +1,13 @@
 [Unit]
 Description=Orchestrator hotkey automation runner
 After=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
-ExecStart=/usr/bin/orchestrator run
+ExecStart="/usr/bin/orchestrator" run
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 
 [Install]
 WantedBy=graphical-session.target

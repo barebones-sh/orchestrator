@@ -30,10 +30,12 @@ then:
 sudo apt install ./orchestrator-cli_<version>_<arch>.deb
 ```
 
-This installs the `orchestrator` binary to `/usr/bin/` and its `.desktop`
-file to `/usr/share/applications/`, and pulls in `ydotool` as a dependency.
-You still need to complete step 1 of "Linux one-time setup" below (the
-`input` group / `ydotoold` step) — that part isn't done by the package.
+This installs the `orchestrator` binary to `/usr/bin/`, its `.desktop` file
+to `/usr/share/applications/`, and its systemd user unit to
+`/usr/lib/systemd/user/` (see "Autostart" below), and pulls in `ydotool` as
+a dependency. You still need to complete step 1 of "Linux one-time setup"
+below (the `input` group / `ydotoold` step) — that part isn't done by the
+package.
 
 ## Linux one-time setup
 
@@ -104,6 +106,11 @@ or `target/release/`, whichever you ran it from), before enabling it.
 
 `orchestrator service status` shows `systemctl --user status` for the
 service; `orchestrator service disable` turns it back off.
+
+`service enable` is most useful once you have at least one profile
+configured (via `profile add`) and have completed the "Linux one-time
+setup" steps above -- starting it before either is done won't crash-loop,
+but still won't do anything useful yet.
 
 ## License
 

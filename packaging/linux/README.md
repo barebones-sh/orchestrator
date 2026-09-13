@@ -1,9 +1,11 @@
 # Linux packaging notes
 
 This file documents the manual, from-source install path. A packaged `.deb`
-(see the repo root README's "Install via `.deb`" section) handles both of
-these steps for you — this file is only relevant if you're building from
-source.
+(see the repo root README's "Install via `.deb`" section) puts the
+`.desktop` file and the systemd unit in place for you, so this file's
+manual steps aren't needed — but it does not run `service enable` for you;
+you still run `orchestrator service enable` yourself to actually turn
+autostart on. This file is only relevant if you're building from source.
 
 ## Dev install (required for `orchestrator run` / `profile add --scope window`'s
 ## hotkey registration to work at all)
@@ -47,9 +49,9 @@ See the repo root README for `.deb` install instructions.
 `~/.config/systemd/user/orchestrator.service` when no `.deb`-installed
 vendor unit is present at `/usr/lib/systemd/user/orchestrator.service` --
 pointing `ExecStart` at whatever binary you actually ran `enable` from
-(`target/debug/orchestrator` or `target/release/orchestrator`). If you
-rebuild to a different profile (debug vs. release) after enabling, re-run
-`orchestrator service enable` to refresh the unit (it only writes one if
-none exists yet -- delete the old one first, or `service disable` then
-`rm ~/.config/systemd/user/orchestrator.service` before re-enabling with
-the new build).
+(`target/debug/orchestrator` or `target/release/orchestrator`). It only
+writes a unit if none exists yet, so if you rebuild to a different profile
+(debug vs. release), delete the old unit first (`orchestrator service
+disable && rm ~/.config/systemd/user/orchestrator.service`), then run
+`orchestrator service enable` again to write a fresh one pointing at the
+new binary.

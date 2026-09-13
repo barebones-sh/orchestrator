@@ -802,13 +802,13 @@ mod linux_run {
     pub fn run(path: std::path::PathBuf) {
         tracing_subscriber::fmt::init();
 
-        let config = match orchestrator_core::Config::load(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("failed to load config at {}: {e}", path.display());
-                std::process::exit(1);
-            }
-        };
+        // final-review Fix 1: a brand-new install with no config file yet
+        // must start cleanly with zero profiles running, not exit(1) --
+        // `load_or_default_config` (already used by every `profile`
+        // subcommand) treats a missing file as "first run, zero profiles"
+        // while still hard-erroring on a file that exists but fails to
+        // parse/validate.
+        let config = super::load_or_default_config(&path);
         println!(
             "loaded {} profile(s) from {}",
             config.profiles.len(),
@@ -871,6 +871,24 @@ mod linux_service {
     /// and starts it.
     pub fn enable() {
         let vendor_present = std::path::Path::new(VENDOR_UNIT_PATH).exists();
+        if vendor_present {
+            // final-review Fix 3: systemd's user-unit search order puts
+            // `~/.config/systemd/user` ABOVE `/usr/lib/systemd/user`
+            // (confirmed via `systemd-analyze --user unit-paths`), so a
+            // leftover user-level unit from an earlier source build's
+            // `service enable` silently shadows the packaged one -- warn
+            // rather than silently keep running the shadowed unit.
+            let user_path = user_unit_path();
+            if user_path.exists() {
+                eprintln!(
+                    "a user-level unit at {} exists and takes precedence over the packaged one \
+                     at {VENDOR_UNIT_PATH} -- remove it (`rm {}`) to use the installed binary, \
+                     then re-run `orchestrator service enable`.",
+                    user_path.display(),
+                    user_path.display()
+                );
+            }
+        }
         if !vendor_present {
             let user_path = user_unit_path();
             if !user_path.exists() {
