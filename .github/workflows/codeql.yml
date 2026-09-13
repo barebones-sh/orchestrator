@@ -10,7 +10,7 @@ on:
 
 jobs:
   analyze:
-    name: Analyze (rust)
+    name: analyze (rust)
     runs-on: ubuntu-latest
     permissions:
       security-events: write
