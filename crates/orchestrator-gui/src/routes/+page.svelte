@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import ProfileList from "$lib/ProfileList.svelte";
   import ProfileForm from "$lib/ProfileForm.svelte";
+  import RunnerStatus from "$lib/RunnerStatus.svelte";
 
   /** @type {any[]} */
   let profiles = $state([]);
@@ -67,6 +68,8 @@
   {#if errorMessage}
     <p class="error">{errorMessage}</p>
   {/if}
+
+  <RunnerStatus />
 
   {#if view === "list"}
     <ProfileList

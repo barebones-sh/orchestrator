@@ -104,3 +104,40 @@ mix Key combo and Scroll kinds, toggle **Loop**, remove a step with
 **Remove step**) and confirm the JSON shape (`"action": {"Macro": {"steps":
 [...], "loop": true}}`) on disk; try leaving the Debounce field blank on
 add and confirm it defaults to `400` on disk.
+
+## Live control
+
+1. Launch the app (`npm run tauri dev` from `crates/orchestrator-gui`, or the built app).
+2. Confirm the status panel shows "Idle" on first load.
+3. If you have no profiles yet, add one first (see the steps above) — e.g. a
+   Desktop-scope Repeat profile.
+4. Click **Start**. Expected: status changes to "Running". If this is the
+   first time this profile's name has ever been registered, KDE will show
+   its own native dialog asking you to press a key combination — press one
+   (e.g. Ctrl+Alt+F9, avoiding any combo already bound to something else on
+   your system) to complete the assignment.
+5. Press the key combination you just assigned. Expected: the configured
+   action actually fires (e.g. the key you configured the profile to repeat
+   gets pressed repeatedly, or the scroll happens) — confirms the whole
+   chain (portal registration -> hotkey event -> input injection) is really
+   live, not just that the button changed color.
+6. Click **Stop**. Expected: status returns to "Idle", and the hotkey you
+   pressed in step 5 no longer does anything.
+7. Click **Start** again for the *same* profile. Expected: status returns
+   to "Running" without KDE re-prompting for a key combo (it remembers the
+   assignment from step 4) — the action fires again on the same key press.
+8. Close the main window (the window-close button, not Quit). Expected:
+   the window disappears but the app keeps running — check the system
+   tray, the icon should still be there. Press the hotkey from step 5
+   again: it should still fire, confirming closing the window didn't stop
+   a running session.
+9. From the tray icon's menu, click **Show window**. Expected: the window
+   reappears, status panel still shows "Running".
+10. From the tray icon's menu, click **Stop**, then **Start**. Expected:
+    matches steps 6-7's behavior, but driven from the tray instead of the
+    window.
+11. From the tray icon's menu, click **Quit**. Expected: the app fully
+    exits (tray icon disappears, no process left running) — check with
+    `pgrep -f orchestrator-gui` or similar; nothing should remain.
+12. Clean up: remove any test profile you added in step 3, the same way
+    the profile-management steps above already show.
