@@ -11,6 +11,7 @@ pub mod action;
 pub mod config;
 pub mod error;
 pub mod profile;
+pub mod profile_ops;
 #[cfg(feature = "runner")]
 pub mod runner;
 
@@ -18,3 +19,4 @@ pub use action::*;
 pub use config::*;
 pub use error::*;
 pub use profile::*;
+pub use profile_ops::*;
