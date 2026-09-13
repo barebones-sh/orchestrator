@@ -23,6 +23,14 @@ struct RunnerHandle {
     state: std::sync::Mutex<RunnerState>,
 }
 
+// `Running`/`Error` are only ever *constructed* by the Linux-gated
+// `do_start_runner`/`do_stop_runner`; on other targets they are merely
+// pattern-matched (in `status_dto`), which doesn't count as a use for
+// dead-code analysis, so `cargo clippy -D warnings` on macOS would fail on
+// them. Same attribute/reasoning already used for the window-only items in
+// `orchestrator-cli/src/profile_commands.rs` and
+// `orchestrator-core/src/profile_ops.rs`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum RunnerState {
     Idle,
     Running {
@@ -54,7 +62,11 @@ fn status_dto(state: &RunnerState) -> RunnerStatusDto {
     }
 }
 
-fn emit_status(app: &tauri::AppHandle, state: &RunnerState) {
+// Only called from the Linux-gated start/stop paths (see `RunnerState` above
+// for the same reasoning), and generic over the Tauri runtime so the mock
+// runtime in this file's tests can drive it too.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn emit_status<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &RunnerState) {
     use tauri::Emitter;
     let _ = app.emit("runner-status-changed", status_dto(state));
 }
@@ -175,7 +187,7 @@ async fn build_runner(
 }
 
 #[cfg(target_os = "linux")]
-fn do_start_runner(app: tauri::AppHandle) -> Result<(), String> {
+fn do_start_runner<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     use tauri::Manager;
 
     let handle = app.state::<RunnerHandle>();
@@ -192,7 +204,28 @@ fn do_start_runner(app: tauri::AppHandle) -> Result<(), String> {
     let stop = std::sync::Arc::new(tokio::sync::Notify::new());
     let stop_for_task = stop.clone();
     let app_for_task = app.clone();
-    tokio::spawn(async move {
+
+    // final-review Fix 2 (part 1): publish `Running { stop }` *before*
+    // spawning, not after. With the write after the spawn, a task that
+    // failed fast (e.g. `build_runner` erroring before the portal is even
+    // reachable) could write `Error(..)` first and then have it immediately
+    // clobbered by this `Running` write, leaving the UI claiming "Running"
+    // for a run that never started.
+    {
+        let mut state = handle.state.lock().unwrap();
+        *state = RunnerState::Running { stop };
+        emit_status(&app, &state);
+    }
+
+    // final-review Fix 1: `tauri::async_runtime::spawn`, NOT `tokio::spawn`.
+    // Synchronous `#[tauri::command]`s run inline on the caller's thread and
+    // the tray's `on_menu_event` fires on the main event-loop thread; neither
+    // has entered a Tokio runtime, so `tokio::spawn` panics there -- and
+    // because that happens across the webview/event-loop FFI boundary the
+    // panic aborts the process instead of unwinding. Tauri owns its own
+    // Tokio runtime and `async_runtime::spawn` schedules onto it from any
+    // thread, runtime context or not.
+    tauri::async_runtime::spawn(async move {
         let result = match build_runner(config.profiles).await {
             Ok(runner) => runner
                 .run(stop_for_task.notified())
@@ -202,21 +235,33 @@ fn do_start_runner(app: tauri::AppHandle) -> Result<(), String> {
         };
         let handle = app_for_task.state::<RunnerHandle>();
         let mut state = handle.state.lock().unwrap();
-        *state = match result {
-            Ok(()) => RunnerState::Idle,
-            Err(e) => RunnerState::Error(e),
-        };
-        emit_status(&app_for_task, &state);
+        // final-review Fix 2 (part 2): only the *current* run may publish its
+        // own completion. A Stop immediately followed by a Start leaves the
+        // previous task still tearing down (unregistering hotkeys, restoring
+        // focus -- real D-Bus round-trips); without this identity check that
+        // stale task's unconditional `Idle` write would clobber the newer
+        // run's `Running { stop2 }`, dropping the only live reference to
+        // `stop2` and leaving an unstoppable Runner behind a UI showing
+        // "Idle". `Arc::ptr_eq` against our own stop handle makes a stale
+        // completion a no-op.
+        let is_current_run = matches!(
+            &*state,
+            RunnerState::Running { stop } if std::sync::Arc::ptr_eq(stop, &stop_for_task)
+        );
+        if is_current_run {
+            *state = match result {
+                Ok(()) => RunnerState::Idle,
+                Err(e) => RunnerState::Error(e),
+            };
+            emit_status(&app_for_task, &state);
+        }
     });
 
-    let mut state = handle.state.lock().unwrap();
-    *state = RunnerState::Running { stop };
-    emit_status(&app, &state);
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn do_stop_runner(app: tauri::AppHandle) -> Result<(), String> {
+fn do_stop_runner<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     use tauri::Manager;
 
     let handle = app.state::<RunnerHandle>();
@@ -233,22 +278,22 @@ fn do_stop_runner(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn do_start_runner(_app: tauri::AppHandle) -> Result<(), String> {
+fn do_start_runner<R: tauri::Runtime>(_app: tauri::AppHandle<R>) -> Result<(), String> {
     Err("live control is only implemented on Linux in this increment".to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn do_stop_runner(_app: tauri::AppHandle) -> Result<(), String> {
+fn do_stop_runner<R: tauri::Runtime>(_app: tauri::AppHandle<R>) -> Result<(), String> {
     Err("live control is only implemented on Linux in this increment".to_string())
 }
 
 #[tauri::command]
-fn start_runner(app: tauri::AppHandle) -> Result<(), String> {
+fn start_runner<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     do_start_runner(app)
 }
 
 #[tauri::command]
-fn stop_runner(app: tauri::AppHandle) -> Result<(), String> {
+fn stop_runner<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     do_stop_runner(app)
 }
 
@@ -260,6 +305,14 @@ fn runner_status(handle: tauri::State<RunnerHandle>) -> RunnerStatusDto {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // final-review Fix 4: without a subscriber every `tracing::warn!` /
+    // `tracing::error!` the embedded `Runner` emits (hotkey channel
+    // disconnects, window-match failures, injection failures) is discarded,
+    // so a silent partial failure would leave the status panel showing
+    // "Running" with no diagnostic signal anywhere. `orchestrator-cli`'s
+    // `linux_run::run` installs one the same way, first thing before setup.
+    tracing_subscriber::fmt::init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(RunnerHandle {
@@ -321,4 +374,105 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// Regression test for the final review's Fix 1: `do_start_runner` used to
+    /// call `tokio::spawn`, which panics (and, across the webview/event-loop
+    /// FFI boundary, aborts the process) when there is no Tokio runtime
+    /// entered on the calling thread — which is exactly the situation for
+    /// both of its real callers (a synchronous `#[tauri::command]`, which runs
+    /// inline on the IPC thread, and the tray's `on_menu_event`, which fires
+    /// on the main event-loop thread).
+    ///
+    /// This is deliberately a plain `#[test]`, **not** `#[tokio::test]`: that
+    /// macro would enter a Tokio runtime on the test thread and make the very
+    /// bug under test disappear. The `try_current()` assertion below pins that
+    /// down so the test can't silently rot into a runtime-having context.
+    #[test]
+    fn start_runner_spawns_from_a_thread_with_no_tokio_runtime() {
+        // Keep this hermetic and, above all, keep it off the developer's real
+        // desktop session: point the config lookup at a directory that does
+        // not exist (so `load_or_default_config` yields zero profiles and the
+        // `Runner` registers no global shortcuts / pops no KDE dialog), and
+        // point the session bus at an unreachable address so `build_runner`'s
+        // portal connection fails fast instead of opening a real portal
+        // session. Neither is required for the spawn-context assertion itself;
+        // both exist so running `cargo test` never touches a live desktop.
+        let missing_config_home = std::env::temp_dir().join(format!(
+            "orchestrator-gui-test-no-config-{}",
+            std::process::id()
+        ));
+        std::env::set_var("XDG_CONFIG_HOME", &missing_config_home);
+        std::env::set_var(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/orchestrator-gui-test-bus",
+        );
+
+        // The whole point: production calls `do_start_runner` from a thread
+        // that has *not* entered a Tokio runtime. If this ever starts failing,
+        // the test has stopped testing the thing that broke.
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "test thread unexpectedly has an ambient Tokio runtime; this test \
+             must run in the runtime-less context production actually uses"
+        );
+
+        // Direct, deterministic proof that the spawn function production now
+        // uses works from this runtime-less thread (the original `tokio::spawn`
+        // would panic right here).
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        tauri::async_runtime::spawn(async move {
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("task spawned via tauri::async_runtime::spawn never ran");
+
+        let app = tauri::test::mock_builder()
+            .manage(RunnerHandle {
+                state: std::sync::Mutex::new(RunnerState::Idle),
+            })
+            .invoke_handler(tauri::generate_handler![
+                list_profiles,
+                add_profile,
+                edit_profile,
+                remove_profile,
+                list_windows,
+                start_runner,
+                stop_runner,
+                runner_status
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+
+        // The real assertion: this must return, not abort the process.
+        let result = do_start_runner(app.handle().clone());
+        assert!(
+            result.is_ok(),
+            "do_start_runner should succeed with an empty config, got {result:?}"
+        );
+
+        // Fix 2 (part 1) corollary: `Running` is published *before* the spawn,
+        // so it is already visible the moment `do_start_runner` returns. It may
+        // have since become `Error(..)` if the spawned task already failed to
+        // reach the (deliberately unreachable) session bus — what must never be
+        // observed here is `Idle`.
+        {
+            use tauri::Manager;
+            let handle = app.handle().state::<RunnerHandle>();
+            let state = handle.state.lock().unwrap();
+            assert!(
+                matches!(&*state, RunnerState::Running { .. } | RunnerState::Error(_)),
+                "expected Running (or an already-failed Error), got Idle"
+            );
+        }
+
+        // Signal any runner that did manage to start to shut down; `Notify`
+        // stores the permit, so this is effective even if the task has not
+        // reached its `notified()` await yet.
+        let _ = do_stop_runner(app.handle().clone());
+    }
 }
