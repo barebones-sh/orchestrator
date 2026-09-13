@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod notation;
 mod profile_commands;
+mod service_commands;
 
 use profile_commands::{ProfileActionArgs, ProfileAddArgs, ProfileCommandError, ProfileEditArgs};
 

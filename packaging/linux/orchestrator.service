@@ -1,0 +1,11 @@
+[Unit]
+Description=Orchestrator hotkey automation runner
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/orchestrator run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

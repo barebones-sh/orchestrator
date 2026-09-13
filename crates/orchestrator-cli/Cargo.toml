@@ -21,6 +21,7 @@ assets = [
 
 [dependencies]
 clap = { workspace = true }
+dirs = "7"
 tracing-subscriber = "0.3"
 
 # Backend selection (design spec §4 "Dependency Philosophy" /
