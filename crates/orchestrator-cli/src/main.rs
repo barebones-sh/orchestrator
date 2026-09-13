@@ -27,6 +27,21 @@ enum Command {
 
     /// Load the config and run all profiles until Ctrl-C.
     Run,
+
+    /// Autostart management: run Orchestrator automatically at login via a
+    /// systemd --user service.
+    #[command(subcommand)]
+    Service(ServiceCommand),
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Install (if needed) and enable + start the systemd user service.
+    Enable,
+    /// Disable + stop the systemd user service.
+    Disable,
+    /// Show `systemctl --user status` for the service.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -409,6 +424,17 @@ fn main() {
         #[cfg(not(target_os = "linux"))]
         Some(Command::Run) => {
             eprintln!("`run` is only implemented on Linux in this increment (macOS backends are still stubs)");
+            std::process::exit(1);
+        }
+        #[cfg(target_os = "linux")]
+        Some(Command::Service(ServiceCommand::Enable)) => linux_service::enable(),
+        #[cfg(target_os = "linux")]
+        Some(Command::Service(ServiceCommand::Disable)) => linux_service::disable(),
+        #[cfg(target_os = "linux")]
+        Some(Command::Service(ServiceCommand::Status)) => linux_service::status(),
+        #[cfg(not(target_os = "linux"))]
+        Some(Command::Service(_)) => {
+            eprintln!("`service` is only implemented on Linux in this increment (macOS backends are still stubs)");
             std::process::exit(1);
         }
     }
@@ -823,5 +849,95 @@ mod linux_run {
                 std::process::exit(1);
             }
         });
+    }
+}
+
+/// Installs (for source builds only -- packaged installs already ship the
+/// vendor unit via `.deb`), enables, disables, and reports the status of
+/// the systemd --user service that runs `orchestrator run` at login.
+///
+/// Real `systemctl`/filesystem side effects live here, deliberately
+/// unit-untested (there's no meaningful way to unit-test invoking a real
+/// systemd user instance) -- verified live instead, the same way
+/// `linux_run`'s real backend construction is. `service_commands.rs` holds
+/// everything about this feature that *can* be pure-tested.
+#[cfg(target_os = "linux")]
+mod linux_service {
+    use crate::service_commands::{render_unit, user_unit_path, UNIT_FILE_NAME, VENDOR_UNIT_PATH};
+    use std::process::Command;
+
+    /// Ensures a unit file is in place (vendor path from a `.deb` install,
+    /// or a freshly written user-level one for source builds), then enables
+    /// and starts it.
+    pub fn enable() {
+        let vendor_present = std::path::Path::new(VENDOR_UNIT_PATH).exists();
+        if !vendor_present {
+            let user_path = user_unit_path();
+            if !user_path.exists() {
+                let exe = match std::env::current_exe() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("failed to resolve the current executable's path: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let unit = render_unit(&exe.display().to_string());
+                if let Some(parent) = user_path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!(
+                            "failed to create {} for the systemd user unit: {e}",
+                            parent.display()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                if let Err(e) = std::fs::write(&user_path, unit) {
+                    eprintln!(
+                        "failed to write the systemd user unit to {}: {e}",
+                        user_path.display()
+                    );
+                    std::process::exit(1);
+                }
+                println!("wrote {}", user_path.display());
+            }
+            run_systemctl(&["--user", "daemon-reload"]);
+        }
+        run_systemctl(&["--user", "enable", "--now", UNIT_FILE_NAME]);
+        println!("{UNIT_FILE_NAME} enabled and started.");
+    }
+
+    pub fn disable() {
+        run_systemctl(&["--user", "disable", "--now", UNIT_FILE_NAME]);
+        println!("{UNIT_FILE_NAME} disabled and stopped.");
+    }
+
+    pub fn status() {
+        let status = Command::new("systemctl")
+            .args(["--user", "status", UNIT_FILE_NAME])
+            .status();
+        match status {
+            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!("failed to run systemctl: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// Runs `systemctl <args>`, inheriting stdio so the user sees systemctl's
+    /// own output, and exits the process on failure (a non-zero exit or a
+    /// failure to even launch `systemctl`, e.g. it's not installed).
+    fn run_systemctl(args: &[&str]) {
+        match Command::new("systemctl").args(args).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("systemctl {} failed with {s}", args.join(" "));
+                std::process::exit(s.code().unwrap_or(1));
+            }
+            Err(e) => {
+                eprintln!("failed to run systemctl {}: {e}", args.join(" "));
+                std::process::exit(1);
+            }
+        }
     }
 }
