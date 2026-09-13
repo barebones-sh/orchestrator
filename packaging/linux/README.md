@@ -40,3 +40,16 @@ earlier app-id draft, since fixed, and this `$PATH` requirement — either
 one alone is enough to produce the exact same error message.)
 
 See the repo root README for `.deb` install instructions.
+
+## Autostart (dev builds)
+
+`orchestrator service enable` writes a user-level systemd unit at
+`~/.config/systemd/user/orchestrator.service` when no `.deb`-installed
+vendor unit is present at `/usr/lib/systemd/user/orchestrator.service` --
+pointing `ExecStart` at whatever binary you actually ran `enable` from
+(`target/debug/orchestrator` or `target/release/orchestrator`). If you
+rebuild to a different profile (debug vs. release) after enabling, re-run
+`orchestrator service enable` to refresh the unit (it only writes one if
+none exists yet -- delete the old one first, or `service disable` then
+`rm ~/.config/systemd/user/orchestrator.service` before re-enabling with
+the new build).

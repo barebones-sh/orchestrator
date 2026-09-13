@@ -89,6 +89,22 @@ orchestrator run
 Use `orchestrator profile list`, `profile edit`, and `profile remove` to
 manage profiles afterward.
 
+## Autostart
+
+Run Orchestrator automatically at login via a systemd user service:
+
+```
+orchestrator service enable
+```
+
+A `.deb` install already ships the unit at `/usr/lib/systemd/user/`, so
+`enable` just turns it on. A from-source build has no such file yet --
+`enable` writes one for you, pointing at your current build (`target/debug/`
+or `target/release/`, whichever you ran it from), before enabling it.
+
+`orchestrator service status` shows `systemctl --user status` for the
+service; `orchestrator service disable` turns it back off.
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache License, Version
