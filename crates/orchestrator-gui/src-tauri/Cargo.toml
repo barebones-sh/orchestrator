@@ -1,0 +1,51 @@
+[package]
+name = "orchestrator-gui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Global-hotkey-triggered input automation for KDE Plasma/Wayland (GUI)"
+repository = "https://github.com/barebones-sh/orchestrator"
+authors = ["barebones-sh"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "orchestrator_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = "1"
+
+# Backend selection (design spec §4), mirroring orchestrator-cli's Cargo.toml:
+# each OS build compiles exactly one set of real backends, selected via Cargo
+# features, not a runtime switch. Paths are `../../` rather than `../` because
+# `src-tauri/` sits one directory below the crate root the old placeholder
+# `orchestrator-gui` manifest lived at.
+[target.'cfg(target_os = "linux")'.dependencies]
+orchestrator-core = { path = "../../orchestrator-core", features = ["kde", "wayland"] }
+orchestrator-hotkey = { path = "../../orchestrator-hotkey", features = ["kde"] }
+orchestrator-window = { path = "../../orchestrator-window", features = ["kde"] }
+orchestrator-input = { path = "../../orchestrator-input", features = ["wayland"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+orchestrator-core = { path = "../../orchestrator-core", features = ["macos"] }
+orchestrator-hotkey = { path = "../../orchestrator-hotkey", features = ["macos"] }
+orchestrator-window = { path = "../../orchestrator-window", features = ["macos"] }
+orchestrator-input = { path = "../../orchestrator-input", features = ["macos"] }
+
+# NOTE: `create-tauri-app` scaffolds a `[profile.release]` block here
+# (codegen-units = 1, lto, panic = "abort", strip) for binary-size reasons.
+# Cargo ignores profiles declared by non-root workspace members and warns on
+# every invocation, so it was dropped rather than carried as permanent noise.
+# If release-size tuning matters at packaging time, it belongs in the root
+# `Cargo.toml` -- and `panic = "abort"` in particular must be evaluated against
+# the other workspace members before being applied there.

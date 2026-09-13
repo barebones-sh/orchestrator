@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "crates/orchestrator-gui/src-tauri"]
+# `crates/orchestrator-gui` is the Tauri *frontend* root (package.json, Vite,
+# SvelteKit); its Rust manifest lives one level deeper in `src-tauri/`, listed
+# above. The `crates/*` glob still matches the directory itself, so it has to
+# be excluded explicitly or Cargo errors on the missing manifest.
+exclude = ["crates/orchestrator-gui"]
 
 [workspace.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }

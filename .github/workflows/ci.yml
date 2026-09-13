@@ -25,6 +25,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # orchestrator-gui is a Tauri app, so `cargo build --workspace` now pulls
+      # in webkit2gtk/soup3/javascriptcore via pkg-config on Linux. GitHub's
+      # Ubuntu runners do not ship those, so the workspace build fails without
+      # this step. Same package list the GUI plan's Global Constraints name for
+      # a local dev machine (minus build-essential/curl/wget/file, which the
+      # runner images already provide). macOS needs nothing extra.
+      - name: Install Tauri Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
