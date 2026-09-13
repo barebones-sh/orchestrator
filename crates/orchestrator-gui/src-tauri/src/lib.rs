@@ -19,6 +19,46 @@ fn load_or_default_config(path: &std::path::Path) -> Result<orchestrator_core::C
     }
 }
 
+struct RunnerHandle {
+    state: std::sync::Mutex<RunnerState>,
+}
+
+enum RunnerState {
+    Idle,
+    Running {
+        stop: std::sync::Arc<tokio::sync::Notify>,
+    },
+    Error(String),
+}
+
+#[derive(Clone, serde::Serialize)]
+struct RunnerStatusDto {
+    state: String,
+    error: Option<String>,
+}
+
+fn status_dto(state: &RunnerState) -> RunnerStatusDto {
+    match state {
+        RunnerState::Idle => RunnerStatusDto {
+            state: "idle".to_string(),
+            error: None,
+        },
+        RunnerState::Running { .. } => RunnerStatusDto {
+            state: "running".to_string(),
+            error: None,
+        },
+        RunnerState::Error(e) => RunnerStatusDto {
+            state: "error".to_string(),
+            error: Some(e.clone()),
+        },
+    }
+}
+
+fn emit_status(app: &tauri::AppHandle, state: &RunnerState) {
+    use tauri::Emitter;
+    let _ = app.emit("runner-status-changed", status_dto(state));
+}
+
 #[tauri::command]
 fn list_profiles() -> Result<Vec<orchestrator_core::Profile>, String> {
     let path = orchestrator_core::Config::config_path();
@@ -98,16 +138,142 @@ async fn list_windows() -> Result<Vec<orchestrator_window::WindowInfo>, String> 
     Err("window listing is only implemented on Linux in this increment".to_string())
 }
 
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "io.github.barebonessh.Orchestrator";
+
+#[cfg(target_os = "linux")]
+async fn build_runner(
+    profiles: Vec<orchestrator_core::Profile>,
+) -> Result<
+    orchestrator_core::runner::Runner<
+        orchestrator_hotkey::kde_portal_shortcuts::KdePortalHotkeyBackend,
+        orchestrator_input::linux_wayland::YdotoolInputInjector,
+        orchestrator_window::kwin_dbus::KwinWindowLocator,
+    >,
+    String,
+> {
+    use orchestrator_hotkey::kde_portal_shortcuts::KdePortalHotkeyBackend;
+    use orchestrator_input::linux_wayland::YdotoolInputInjector;
+    use orchestrator_input::InputInjector;
+    use orchestrator_window::kwin_dbus::KwinWindowLocator;
+
+    let hotkey = KdePortalHotkeyBackend::new(APP_ID)
+        .await
+        .map_err(|e| format!("failed to construct hotkey backend: {e}"))?;
+    let window = KwinWindowLocator::new()
+        .await
+        .map_err(|e| format!("failed to construct window locator: {e}"))?;
+    let mut input = YdotoolInputInjector::new();
+    input
+        .connect()
+        .await
+        .map_err(|e| format!("failed to connect input injector: {e}"))?;
+
+    Ok(orchestrator_core::runner::Runner::new(
+        hotkey, input, window, profiles,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn do_start_runner(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let handle = app.state::<RunnerHandle>();
+    {
+        let state = handle.state.lock().unwrap();
+        if matches!(&*state, RunnerState::Running { .. }) {
+            return Err("already running".to_string());
+        }
+    }
+
+    let path = orchestrator_core::Config::config_path();
+    let config = load_or_default_config(&path)?;
+
+    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stop_for_task = stop.clone();
+    let app_for_task = app.clone();
+    tokio::spawn(async move {
+        let result = match build_runner(config.profiles).await {
+            Ok(runner) => runner
+                .run(stop_for_task.notified())
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
+        let handle = app_for_task.state::<RunnerHandle>();
+        let mut state = handle.state.lock().unwrap();
+        *state = match result {
+            Ok(()) => RunnerState::Idle,
+            Err(e) => RunnerState::Error(e),
+        };
+        emit_status(&app_for_task, &state);
+    });
+
+    let mut state = handle.state.lock().unwrap();
+    *state = RunnerState::Running { stop };
+    emit_status(&app, &state);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn do_stop_runner(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let handle = app.state::<RunnerHandle>();
+    let mut state = handle.state.lock().unwrap();
+    match &*state {
+        RunnerState::Running { stop } => {
+            stop.notify_one();
+            *state = RunnerState::Idle;
+            emit_status(&app, &state);
+            Ok(())
+        }
+        _ => Err("not running".to_string()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn do_start_runner(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("live control is only implemented on Linux in this increment".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn do_stop_runner(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("live control is only implemented on Linux in this increment".to_string())
+}
+
+#[tauri::command]
+fn start_runner(app: tauri::AppHandle) -> Result<(), String> {
+    do_start_runner(app)
+}
+
+#[tauri::command]
+fn stop_runner(app: tauri::AppHandle) -> Result<(), String> {
+    do_stop_runner(app)
+}
+
+#[tauri::command]
+fn runner_status(handle: tauri::State<RunnerHandle>) -> RunnerStatusDto {
+    let state = handle.state.lock().unwrap();
+    status_dto(&state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(RunnerHandle {
+            state: std::sync::Mutex::new(RunnerState::Idle),
+        })
         .invoke_handler(tauri::generate_handler![
             list_profiles,
             add_profile,
             edit_profile,
             remove_profile,
-            list_windows
+            list_windows,
+            start_runner,
+            stop_runner,
+            runner_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
