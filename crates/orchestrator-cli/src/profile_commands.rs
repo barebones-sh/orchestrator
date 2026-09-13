@@ -232,6 +232,72 @@ mod tests {
         assert!(matches!(err, ProfileCommandError::Notation(_)));
     }
 
+    // -- wrapper error-conversion: `impl From<ProfileOpError> for
+    // ProfileCommandError` and the `.map_err(Into::into)` call sites are
+    // only exercised by calling the CLI's own public wrapper functions
+    // (not `profile_ops` directly) -- the underlying `ProfileOpError`
+    // logic itself is already fully covered by `profile_ops.rs`'s own
+    // test module, so these are deliberately thin.
+
+    #[test]
+    fn add_profile_wraps_duplicate_name_as_op_error() {
+        let mut config = empty_config();
+        let args = |name: &str| ProfileAddArgs {
+            name: name.to_string(),
+            scope: Scope::Desktop,
+            action: ProfileActionArgs::Repeat {
+                input: "key:A".to_string(),
+                interval_ms: 100,
+                jitter_ms: None,
+            },
+            debounce_ms: None,
+        };
+        add_profile(&mut config, args("dup")).unwrap();
+        let err = add_profile(&mut config, args("dup")).unwrap_err();
+        assert_eq!(
+            err,
+            ProfileCommandError::Op(ProfileOpError::DuplicateProfileName("dup".to_string()))
+        );
+    }
+
+    #[test]
+    fn edit_profile_wraps_unknown_name_as_op_error() {
+        let mut config = empty_config();
+        let err = edit_profile(
+            &mut config,
+            "nope",
+            ProfileEditArgs {
+                scope: None,
+                action: None,
+                debounce_ms: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ProfileCommandError::Op(ProfileOpError::NoSuchProfile("nope".to_string()))
+        );
+    }
+
+    #[test]
+    fn remove_profile_wraps_unknown_name_as_op_error() {
+        let mut config = empty_config();
+        let err = remove_profile(&mut config, "nope").unwrap_err();
+        assert_eq!(
+            err,
+            ProfileCommandError::Op(ProfileOpError::NoSuchProfile("nope".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_window_scope_wraps_empty_window_list_as_op_error() {
+        let err = resolve_window_scope(&[], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ProfileCommandError::Op(ProfileOpError::NoWindowsAvailable)
+        );
+    }
+
     // -- final-review Fix 1(a): add_profile/edit_profile don't validate ----
     // ------------------------------------------------------------------------
     // `add_profile`/`edit_profile` are deliberately pure and don't duplicate
