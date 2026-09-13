@@ -265,6 +265,50 @@ pub fn run() {
         .manage(RunnerHandle {
             state: std::sync::Mutex::new(RunnerState::Idle),
         })
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::TrayIconBuilder;
+            use tauri::Manager;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let window_for_close = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_for_close.hide();
+                    }
+                });
+            }
+
+            let start_item = MenuItem::with_id(app, "start", "Start", true, None::<&str>)?;
+            let stop_item = MenuItem::with_id(app, "stop", "Stop", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, "show", "Show window", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&start_item, &stop_item, &show_item, &quit_item])?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "start" => {
+                        let _ = do_start_runner(app.clone());
+                    }
+                    "stop" => {
+                        let _ = do_stop_runner(app.clone());
+                    }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_profiles,
             add_profile,
