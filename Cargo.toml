@@ -12,6 +12,6 @@ ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "g
 clap = { version = "4.6.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = { version = "2" }
-zbus = { version = "5.18" }
+zbus = { version = "6.1" }
 tokio = { version = "1", features = ["sync"] }
 tracing = { version = "0.1" }
